@@ -1,0 +1,19 @@
+{
+  "name": "lambda-creator-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "aws-sdk": "^2.1692.0",
+    "axios": "^1.8.1",
+    "dotenv": "^16.4.7",
+    "jszip": "^3.10.1"
+  }
+}
