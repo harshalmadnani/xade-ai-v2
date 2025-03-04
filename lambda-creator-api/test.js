@@ -8,7 +8,7 @@ async function testLambdaCreator() {
   const timestamp = Date.now();
   
   // Try multiple times with increasing delays
-  const maxRetries = 5;
+  const maxRetries = 1;
   let retryCount = 0;
   let success = false;
   

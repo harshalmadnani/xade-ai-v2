@@ -23,6 +23,11 @@ exports.handler = async (event) => {
     } catch (error) {
         return {
             statusCode: 400,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
             body: JSON.stringify({ message: 'Invalid request body' })
         };
     }
@@ -32,6 +37,11 @@ exports.handler = async (event) => {
     if (!userId || !interval || !query || !systemPrompt) {
         return {
             statusCode: 400,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
             body: JSON.stringify({ message: 'Missing required parameters' })
         };
     }
@@ -43,6 +53,11 @@ exports.handler = async (event) => {
     if (!supabaseUrl || !supabaseKey) {
         return {
             statusCode: 500,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
             body: JSON.stringify({ message: 'Missing Supabase configuration' })
         };
     }
@@ -174,6 +189,11 @@ exports.handler = async (event) => {
             console.error('Available environment variables:', Object.keys(process.env));
             return {
                 statusCode: 500,
+                headers: {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                    'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                },
                 body: JSON.stringify({ 
                     message: 'Error creating analysis function', 
                     error: 'Lambda execution role not configured' 
@@ -240,6 +260,11 @@ exports.handler = async (event) => {
             console.error('Failed to create Lambda function:', createError);
             return {
                 statusCode: 500,
+                headers: {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                    'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                },
                 body: JSON.stringify({ 
                     message: 'Error creating analysis function', 
                     error: createError.message 
@@ -289,6 +314,11 @@ exports.handler = async (event) => {
         
         return {
             statusCode: 200,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
             body: JSON.stringify({
                 message: 'Analysis function created and scheduled successfully',
                 functionName,
@@ -301,6 +331,11 @@ exports.handler = async (event) => {
         console.error('Error:', error);
         return {
             statusCode: 500,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
             body: JSON.stringify({ 
                 message: 'Error creating analysis function', 
                 error: error.message 

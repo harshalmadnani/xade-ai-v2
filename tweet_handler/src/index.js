@@ -7,6 +7,8 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Add CORS middleware
+
 // Initialize Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
@@ -137,10 +139,15 @@ async function postTweet(twitterCredentials, tweetContent) {
         }
         
         console.log(`Processed ${cookieArray.length} cookies`);
+        
+        // Use the fromCookies method as documented
         scraper = await Scraper.fromCookies(cookieArray);
         
         // Test if cookies are still valid
-        await scraper.testLogin();
+        const isLoggedIn = await scraper.isLoggedIn();
+        if (!isLoggedIn) {
+          throw new Error('Cookies are invalid or expired');
+        }
         console.log('Cookies are valid, using existing session');
       } catch (cookieError) {
         console.log('Cookies expired or invalid, logging in again:', cookieError.message);
@@ -364,10 +371,28 @@ async function setupScraper(twitterCredentials) {
   if (cookies && (Array.isArray(cookies) ? cookies.length > 0 : cookies)) {
     try {
       console.log('Attempting to use saved cookies...');
-      scraper = await Scraper.fromCookies(cookies);
+      
+      // Process cookies if needed
+      let cookieArray = cookies;
+      if (typeof cookies === 'string') {
+        try {
+          cookieArray = JSON.parse(cookies);
+        } catch (parseError) {
+          cookieArray = cookies.includes('\n') 
+            ? cookies.split('\n').filter(c => c.trim()) 
+            : cookies.split(',').map(c => c.trim());
+        }
+      }
+      
+      // Use the fromCookies method as documented
+      scraper = await Scraper.fromCookies(cookieArray);
       
       // Test if cookies are still valid
-      await scraper.testLogin();
+      const isLoggedIn = await scraper.isLoggedIn();
+      if (!isLoggedIn) {
+        throw new Error('Cookies are invalid or expired');
+      }
+      
       console.log('Cookies are valid, using existing session');
       return scraper;
     } catch (cookieError) {
@@ -404,7 +429,20 @@ async function setupScraper(twitterCredentials) {
 
 // Start the server and setup subscription
 app.listen(port, async () => {
-  console.log(`Server running on port ${port}`);
-  await setupRealtimeSubscription();
-  console.log('Realtime subscription setup complete');
+  try {
+    console.log(`Server running on port ${port}`);
+    await setupRealtimeSubscription();
+    console.log('Realtime subscription setup complete');
+  } catch (error) {
+    console.error('Error during server startup:', error);
+  }
+});
+
+// Add a global error handler
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
