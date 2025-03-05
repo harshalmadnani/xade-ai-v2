@@ -285,7 +285,270 @@ async function updateTwitterCredentials(agentId, cookieStrings) {
   }
 }
 
-// Set up real-time subscription
+// Function to get latest tweets for a user
+async function getLatestTweets(scraper, username, count = 10, includeRetweets = false) {
+  const tweets = [];
+  try {
+    const timeline = scraper.getTweets(username, count);
+    
+    for await (const tweet of timeline) {
+      // Skip retweets and quote tweets
+      if (!includeRetweets && (tweet.isRetweet || tweet.isQuoted)) {
+        continue;
+      }
+      tweets.push(tweet);
+      if (tweets.length >= count) {
+        break;
+      }
+    }
+    
+    console.log(`Retrieved ${tweets.length} original tweets from @${username}`);
+    return tweets;
+  } catch (error) {
+    console.error(`Error fetching tweets for @${username}:`, error);
+    return [];
+  }
+}
+
+// Function to get tweets for all users in reply_to_usernames
+async function getTargetUserTweets(agentId) {
+  try {
+    // Fetch agent configuration
+    const { data: agentData, error: agentError } = await supabase
+      .from('agents2')
+      .select('chat_configuration')
+      .eq('id', agentId)
+      .single();
+
+    if (agentError) throw agentError;
+
+    let chatConfig;
+    try {
+      chatConfig = typeof agentData.chat_configuration === 'string' 
+        ? JSON.parse(agentData.chat_configuration)
+        : agentData.chat_configuration;
+    } catch (parseError) {
+      console.error('Error parsing chat_configuration:', parseError);
+      return [];
+    }
+
+    if (!chatConfig?.reply_to_usernames?.length) {
+      console.log('No target usernames found in configuration');
+      return [];
+    }
+
+    // Get Twitter credentials and set up scraper
+    const credentials = await getTwitterCredentials(agentId);
+    if (!credentials) {
+      throw new Error('Failed to get Twitter credentials');
+    }
+
+    const scraper = await setupScraper(credentials);
+    
+    try {
+      const allTweets = [];
+      
+      // Fetch tweets for each username
+      for (const username of chatConfig.reply_to_usernames) {
+        const userTweets = await getLatestTweets(scraper, username);
+        allTweets.push(...userTweets);
+      }
+
+      // Close the scraper after we're done
+      if (scraper?.close) {
+        await scraper.close();
+      }
+
+      return allTweets;
+    } catch (error) {
+      throw error;
+    } finally {
+      // Ensure scraper is closed even if there's an error
+      if (scraper?.close) {
+        await scraper.close();
+      }
+    }
+  } catch (error) {
+    console.error('Error in getTargetUserTweets:', error);
+    return [];
+  }
+}
+
+// Function to get AI analysis for a tweet
+async function getAIAnalysis(tweetText) {
+  try {
+    const response = await fetch('http://13.233.51.247:3004/api/analyze', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: tweetText,
+        systemPrompt: "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response. Keep responses concise and friendly. Don't use hashtags or emojis unless they were in the original tweet."
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('API request failed with status: ' + response.status);
+    }
+
+    const data = await response.json();
+    
+    // Extract the analysis from the nested response
+    let analysis;
+    if (data && typeof data === 'object') {
+      if (data.data && data.data.analysis) {
+        analysis = data.data.analysis;
+      } else if (data.result && data.result.description) {
+        analysis = data.result.description;
+      } else if (data.description) {
+        analysis = data.description;
+      } else if (data.data && typeof data.data === 'string') {
+        analysis = data.data;
+      } else if (data.result && typeof data.result === 'string') {
+        analysis = data.result;
+      } else {
+        analysis = JSON.stringify(data);
+      }
+    } else {
+      analysis = String(data);
+    }
+
+    return analysis;
+  } catch (error) {
+    console.error('Error getting AI analysis:', error);
+    return null;
+  }
+}
+
+// Update the generateMentionReply function to use AI analysis
+async function generateMentionReply(tweet) {
+  try {
+    const analysis = await getAIAnalysis(tweet.text || '');
+    
+    if (analysis) {
+      // Ensure the reply starts with the username mention
+      if (!analysis.startsWith(`@${tweet.username}`)) {
+        return `@${tweet.username} ${analysis}`;
+      }
+      return analysis;
+    }
+    
+    // Fallback to default responses if AI analysis fails
+    let replyText = `@${tweet.username} `;
+    const tweetText = tweet.text?.toLowerCase() || '';
+    
+    if (tweetText.includes('help') || tweetText.includes('how')) {
+      replyText += "I'll be happy to help! Please provide more details.";
+    } else if (tweetText.includes('thanks') || tweetText.includes('thank you')) {
+      replyText += "You're welcome! Let me know if you need anything else.";
+    } else if (tweetText.includes('question')) {
+      replyText += "I'll do my best to answer your question. What would you like to know?";
+    } else {
+      replyText += "Thanks for reaching out! I appreciate your message.";
+    }
+    
+    return replyText;
+  } catch (error) {
+    console.error('Error generating reply:', error);
+    return `@${tweet.username} Thanks for reaching out!`;
+  }
+}
+
+// Rate limiter helper
+const rateLimiter = {
+  lastRequest: 0,
+  minDelay: 2000, // 2 seconds minimum between requests
+  
+  async wait() {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequest;
+    
+    if (timeSinceLastRequest < this.minDelay) {
+      await new Promise(resolve => 
+        setTimeout(resolve, this.minDelay - timeSinceLastRequest)
+      );
+    }
+    
+    this.lastRequest = Date.now();
+  }
+};
+
+// Function to reply to mentions
+async function replyToMentions(scraper, maxMentions = 10, delayMs = 2000, sinceHours = 24) {
+  try {
+    const { username } = await scraper.getMyInfo();
+    if (!username) {
+      throw new Error('Could not determine logged-in username');
+    }
+
+    const mentions = [];
+    const now = Date.now();
+    
+    console.log(`Searching for mentions of @${username} in the last ${sinceHours} hours...`);
+    
+    // Search for recent mentions
+    for await (const tweet of scraper.searchTweets(`@${username}`, maxMentions, SearchMode.Latest)) {
+      // Skip tweets older than sinceHours
+      if (tweet.timeParsed && 
+          (now - tweet.timeParsed.getTime()) > (sinceHours * 60 * 60 * 1000)) {
+        continue;
+      }
+      
+      // Skip own tweets and already replied tweets
+      if (tweet.username === username || 
+          (tweet.isReply && tweet.inReplyToStatusId)) {
+        continue;
+      }
+      
+      // Basic spam check
+      if (tweet.text?.toLowerCase().includes('win free') || 
+          tweet.text?.toLowerCase().includes('click here')) {
+        console.log(`Skipping potential spam tweet from @${tweet.username}`);
+        continue;
+      }
+      
+      mentions.push(tweet);
+      if (mentions.length >= maxMentions) {
+        break;
+      }
+    }
+
+    console.log(`Found ${mentions.length} recent mentions to reply to`);
+
+    // Reply to each valid mention
+    for (const tweet of mentions) {
+      if (!tweet.id) continue;
+
+      try {
+        await rateLimiter.wait(); // Respect rate limits
+        
+        const customReplyText = await generateMentionReply(tweet); // Note the await here
+        await scraper.sendTweet(customReplyText, tweet.id);
+        
+        console.log(`✓ Replied to @${tweet.username}'s mention`);
+        console.log(`  Original: ${tweet.text?.substring(0, 100)}...`);
+        console.log(`  Reply: ${customReplyText}`);
+        
+        // Add additional delay between replies
+        if (mentions.indexOf(tweet) < mentions.length - 1) {
+          console.log(`Waiting ${delayMs}ms before next reply...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      } catch (error) {
+        console.error(`✗ Error replying to mention ${tweet.id}:`, error);
+        continue;
+      }
+    }
+    
+    console.log('Finished processing mentions');
+    
+  } catch (error) {
+    console.error('Error processing mentions:', error);
+  }
+}
+
+// Update setupRealtimeSubscription to reply to fetched tweets
 async function setupRealtimeSubscription() {
   const terminal2 = supabase
     .channel('custom-channel')
@@ -355,6 +618,50 @@ async function setupRealtimeSubscription() {
           }
         } else {
           console.log('Skipping already processed record or record with non-pending status');
+        }
+
+        // Always fetch tweets when there's a new record
+        if (payload.new && payload.new.agent_id) {
+          const tweets = await getTargetUserTweets(payload.new.agent_id);
+          console.log(`Fetched ${tweets.length} tweets from target users`);
+          
+          // Get credentials and setup scraper for replies
+          const credentials = await getTwitterCredentials(payload.new.agent_id);
+          if (credentials) {
+            const scraper = await setupScraper(credentials);
+            try {
+              // Reply to each fetched tweet
+              for (const tweet of tweets) {
+                try {
+                  await rateLimiter.wait(); // Respect rate limits
+                  
+                  // Get AI-generated reply
+                  const analysis = await getAIAnalysis(tweet.text || '');
+                  if (!analysis) continue;
+                  
+                  const replyText = `@${tweet.username} ${analysis}`;
+                  await scraper.sendTweet(replyText, tweet.id);
+                  
+                  console.log(`✓ Replied to tweet from @${tweet.username}`);
+                  console.log(`  Original: ${tweet.text?.substring(0, 100)}...`);
+                  console.log(`  Reply: ${replyText}`);
+                  
+                  // Add delay between replies
+                  await new Promise(resolve => setTimeout(resolve, 3000));
+                } catch (error) {
+                  console.error(`Error replying to tweet ${tweet.id}:`, error);
+                  continue;
+                }
+              }
+            } finally {
+              if (scraper?.close) {
+                await scraper.close();
+              }
+            }
+          }
+          
+          // Process mentions after handling fetched tweets
+          await replyToMentions(scraper, 10, 3000, 24);
         }
       }
     )
