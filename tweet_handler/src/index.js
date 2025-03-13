@@ -624,90 +624,115 @@ const rateLimiter = {
 };
 
 // Function to reply to mentions
-async function replyToMentions(scraper, maxMentions = 10, delayMs = 2000, sinceHours = 24) {
+async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs = 2000, sinceHours = 24) {
   try {
-    // Get username using searchTweets instead of getMyInfo
-    let myUsername = null;
-    try {
-      // Search for a tweet to get our own username from the auth context
-      const testSearch = scraper.searchTweets('', 1);
-      const searchResult = await testSearch.next();
-      if (!searchResult.done && searchResult.value) {
-        // The authenticated user's username should be available in the search context
-        myUsername = searchResult.value.authenticatedUsername;
-      }
-    } catch (searchError) {
-      console.error('Error determining username:', searchError);
-      throw new Error('Could not determine logged-in username');
-    }
+    const myUsername = credentials.username;
+    console.log('=== Starting replyToMentions ===');
+    console.log(`Bot username: @${myUsername}`);
+    console.log(`Max mentions to process: ${maxMentions}`);
+    console.log(`Delay between replies: ${delayMs}ms`);
+    console.log(`Looking back: ${sinceHours} hours`);
 
     if (!myUsername) {
+      console.error('ERROR: No username found in credentials:', credentials);
       throw new Error('Could not determine logged-in username');
     }
 
     const mentions = [];
     const now = Date.now();
+    const query = `@${myUsername}`;
     
-    console.log(`Searching for mentions of @${myUsername} in the last ${sinceHours} hours...`);
+    console.log(`\n🔍 Searching for mentions using query: "${query}"`);
     
-    // Search for recent mentions
-    for await (const tweet of scraper.searchTweets(`@${myUsername}`, maxMentions, SearchMode.Latest)) {
-      // Skip tweets older than sinceHours
-      if (tweet.timeParsed && 
-          (now - tweet.timeParsed.getTime()) > (sinceHours * 60 * 60 * 1000)) {
-        continue;
+    // Search for recent mentions with more debug logging
+    let skippedCount = { old: 0, self: 0, replied: 0, spam: 0 };
+    let rawTweetCount = 0;
+    
+    try {
+      // Use searchTweets with maxMentions parameter and searchMode 1 (Latest)
+      for await (const tweet of scraper.searchTweets(query, maxMentions, 1)) {
+        rawTweetCount++;
+        console.log(`\n[DEBUG] Raw tweet ${rawTweetCount}:`, {
+          id: tweet.id,
+          username: tweet.username,
+          text: tweet.text?.substring(0, 50),
+          isReply: tweet.isReply,
+          inReplyToStatusId: tweet.inReplyToStatusId,
+          timeParsed: tweet.timeParsed
+        });
+        
+        // Skip own tweets
+        if (tweet.username === myUsername) {
+          skippedCount.self++;
+          console.log('  🤖 Skipped: Own tweet');
+          continue;
+        }
+
+        // Skip tweets older than sinceHours
+        if (tweet.timeParsed && 
+            (now - tweet.timeParsed.getTime()) > (sinceHours * 60 * 60 * 1000)) {
+          skippedCount.old++;
+          console.log('  ⏰ Skipped: Tweet too old');
+          continue;
+        }
+        
+        // Basic spam check
+        if (tweet.text?.toLowerCase().includes('win free') || 
+            tweet.text?.toLowerCase().includes('click here')) {
+          skippedCount.spam++;
+          console.log('  🚫 Skipped: Potential spam');
+          continue;
+        }
+        
+        console.log('  ✅ Tweet accepted for reply');
+        mentions.push(tweet);
       }
-      
-      // Skip own tweets and already replied tweets
-      if (tweet.username === myUsername || 
-          (tweet.isReply && tweet.inReplyToStatusId)) {
-        continue;
-      }
-      
-      // Basic spam check
-      if (tweet.text?.toLowerCase().includes('win free') || 
-          tweet.text?.toLowerCase().includes('click here')) {
-        console.log(`Skipping potential spam tweet from @${tweet.username}`);
-        continue;
-      }
-      
-      mentions.push(tweet);
-      if (mentions.length >= maxMentions) {
-        break;
-      }
+    } catch (searchError) {
+      console.error('\n❌ Error during tweet search:', searchError);
     }
 
-    console.log(`Found ${mentions.length} recent mentions to reply to`);
+    console.log('\n=== Search Results ===');
+    console.log(`Total tweets found: ${rawTweetCount}`);
+    console.log(`Found ${mentions.length} valid mentions to reply to`);
+    console.log('Skipped tweets:', skippedCount);
 
     // Reply to each valid mention
+    console.log('\n=== Starting Replies ===');
     for (const tweet of mentions) {
-      if (!tweet.id) continue;
+      if (!tweet.id) {
+        console.log('⚠️ Skipping tweet with no ID');
+        continue;
+      }
 
       try {
-        await rateLimiter.wait(); // Respect rate limits
+        console.log(`\n📝 Processing reply to @${tweet.username}`);
+        console.log(`Original tweet: "${tweet.text?.substring(0, 100)}..."`);
         
-        const customReplyText = await generateMentionReply(tweet); // Note the await here
+        await rateLimiter.wait();
+        console.log('Rate limit respected');
+        
+        const customReplyText = await generateMentionReply(tweet);
+        console.log(`Generated reply: "${customReplyText}"`);
+        
+        // Use sendTweet instead of tweet
         await scraper.sendTweet(customReplyText, tweet.id);
+        console.log('✨ Reply sent successfully');
         
-        console.log(`✓ Replied to @${tweet.username}'s mention`);
-        console.log(`  Original: ${tweet.text?.substring(0, 100)}...`);
-        console.log(`  Reply: ${customReplyText}`);
-        
-        // Add additional delay between replies
         if (mentions.indexOf(tweet) < mentions.length - 1) {
-          console.log(`Waiting ${delayMs}ms before next reply...`);
+          console.log(`⏳ Waiting ${delayMs}ms before next reply...`);
           await new Promise(resolve => setTimeout(resolve, delayMs));
         }
       } catch (error) {
-        console.error(`✗ Error replying to mention ${tweet.id}:`, error);
+        console.error(`❌ Error replying to tweet ${tweet.id}:`, error);
         continue;
       }
     }
     
-    console.log('Finished processing mentions');
+    console.log('\n=== Finished Processing Mentions ===');
+    console.log(`Successfully processed ${mentions.length} mentions`);
     
   } catch (error) {
-    console.error('Error processing mentions:', error);
+    console.error('\n❌ Fatal error in replyToMentions:', error);
   }
 }
 
@@ -820,7 +845,7 @@ async function setupRealtimeSubscription() {
               }
               
               // Process mentions while scraper is still valid
-              await replyToMentions(scraper, 10, 3000, 24);
+              await replyToMentions(scraper, credentials, 10, 3000, 24);
               
             } finally {
               if (scraper?.close) {
