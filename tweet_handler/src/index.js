@@ -736,7 +736,104 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
   }
 }
 
-// Update setupRealtimeSubscription to reply to fetched tweets
+// Function to handle replies to your tweets
+async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs = 2000) {
+  try {
+    const myUsername = credentials.username;
+    console.log('=== Starting handleTweetReplies ===');
+    console.log(`Bot username: @${myUsername}`);
+    console.log(`Max tweets to check: ${maxTweets}`);
+    console.log(`Delay between replies: ${delayMs}ms`);
+
+    if (!myUsername) {
+      console.error('ERROR: No username found in credentials:', credentials);
+      throw new Error('Could not determine logged-in username');
+    }
+
+    // Get your recent tweets
+    const myTweets = [];
+    console.log(`\n🔍 Fetching recent tweets for @${myUsername}...`);
+    
+    try {
+      for await (const tweet of scraper.getTweetsAndReplies(myUsername, maxTweets)) {
+        // Only include tweets by the bot
+        if (tweet.username === myUsername) {
+          myTweets.push(tweet);
+          console.log(`Found tweet: "${tweet.text?.substring(0, 50)}..."`);
+        }
+      }
+    } catch (searchError) {
+      console.error('\n❌ Error fetching tweets:', searchError);
+    }
+
+    console.log(`\nFound ${myTweets.length} of your tweets to check for replies`);
+
+    // Process each tweet and its replies
+    for (const tweet of myTweets) {
+      console.log(`\n📝 Checking replies for tweet: ${tweet.id}`);
+      console.log(`Original tweet: "${tweet.text?.substring(0, 100)}..."`);
+
+      try {
+        // Get replies to this tweet
+        const replies = await scraper.getTweetReplies(tweet.id);
+        console.log(`Found ${replies.length} replies to check`);
+
+        // Process each reply
+        for (const reply of replies) {
+          // Skip own replies
+          if (reply.username === myUsername) {
+            console.log(`  🤖 Skipping own reply from @${reply.username}`);
+            continue;
+          }
+
+          // Check if we've already replied to this tweet
+          const hasReplied = await hasAlreadyReplied(scraper, reply.id, myUsername);
+          if (hasReplied) {
+            console.log(`  ↩️ Already replied to @${reply.username}'s tweet`);
+            continue;
+          }
+
+          console.log(`\n  💬 Processing reply from @${reply.username}`);
+          console.log(`  Reply text: "${reply.text?.substring(0, 100)}..."`);
+
+          // Generate and send reply
+          await rateLimiter.wait();
+          const customReplyText = await generateMentionReply(reply);
+          console.log(`  Generated response: "${customReplyText}"`);
+
+          await scraper.sendTweet(customReplyText, reply.id);
+          console.log(`  ✨ Reply sent successfully`);
+
+          // Add delay between replies
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      } catch (replyError) {
+        console.error(`❌ Error processing replies for tweet ${tweet.id}:`, replyError);
+        continue;
+      }
+
+      // Add longer delay between processing different tweets
+      await new Promise(resolve => setTimeout(resolve, delayMs * 2.5));
+    }
+
+    console.log('\n=== Finished Processing Tweet Replies ===');
+  } catch (error) {
+    console.error('\n❌ Fatal error in handleTweetReplies:', error);
+  }
+}
+
+// Helper function to check if we've already replied
+async function hasAlreadyReplied(scraper, tweetId, myUsername) {
+  try {
+    const replies = await scraper.getTweetReplies(tweetId);
+    return replies.some(reply => reply.username === myUsername);
+  } catch (error) {
+    console.error(`Error checking for existing replies to ${tweetId}:`, error);
+    return false;
+  }
+}
+
+// Update setupRealtimeSubscription to include reply handling
 async function setupRealtimeSubscription() {
   const terminal2 = supabase
     .channel('custom-channel')
@@ -810,42 +907,17 @@ async function setupRealtimeSubscription() {
 
         // Always fetch tweets when there's a new record
         if (payload.new && payload.new.agent_id) {
-          const tweets = await getTargetUserTweets(payload.new.agent_id);
-          console.log(`Fetched ${tweets.length} tweets from target users`);
-          
-          // Get credentials and setup scraper for replies
           const credentials = await getTwitterCredentials(payload.new.agent_id);
           if (credentials) {
             let scraper = null;
             try {
               scraper = await setupScraper(credentials);
               
-              // Reply to each fetched tweet
-              for (const tweet of tweets) {
-                try {
-                  await rateLimiter.wait(); // Respect rate limits
-                  
-                  // Get AI-generated reply
-                  const analysis = await getAIAnalysis(tweet.text || '');
-                  if (!analysis) continue;
-                  
-                  const replyText = `@${tweet.username} ${analysis}`;
-                  await scraper.sendTweet(replyText, tweet.id);
-                  
-                  console.log(`✓ Replied to tweet from @${tweet.username}`);
-                  console.log(`  Original: ${tweet.text?.substring(0, 100)}...`);
-                  console.log(`  Reply: ${replyText}`);
-                  
-                  // Add delay between replies
-                  await new Promise(resolve => setTimeout(resolve, 3000));
-                } catch (error) {
-                  console.error(`Error replying to tweet ${tweet.id}:`, error);
-                  continue;
-                }
-              }
-              
-              // Process mentions while scraper is still valid
+              // Handle mentions first
               await replyToMentions(scraper, credentials, 10, 3000, 24);
+              
+              // Then handle replies to our tweets
+              await handleTweetReplies(scraper, credentials, 20, 3000);
               
             } finally {
               if (scraper?.close) {
