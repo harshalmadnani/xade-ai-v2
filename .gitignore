@@ -4,3 +4,5 @@ node_modules/
 .git/
 .DS_Store
 ./env
+# Start Generation Here
+agent-server.cer

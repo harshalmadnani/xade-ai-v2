@@ -310,25 +310,138 @@ async function getLatestTweets(scraper, username, count = 10, includeRetweets = 
   }
 }
 
-// Function to get tweets for all users in reply_to_usernames
+// Function to find live Spaces by username
+async function findSpacesByUser(scraper, username) {
+  try {
+    console.log(`Searching for Spaces hosted by @${username}...`);
+    
+    // Use searchSpaces if available
+    if (typeof scraper.searchSpaces === 'function') {
+      const spaces = await scraper.searchSpaces(`from:${username}`);
+      const liveSpaces = spaces.filter(space => space.state === 'Live');
+      
+      console.log(`Found ${liveSpaces.length} live Spaces for @${username}`);
+      return liveSpaces.map(space => ({
+        id: space.id,
+        title: space.title,
+        hostUsername: username,
+        participantCount: space.participant_count || 0
+      }));
+    } else {
+      // If no Spaces API is available
+      console.log('Spaces API not available in current twitter-agent version');
+      return [];
+    }
+  } catch (error) {
+    console.error(`Error finding Spaces for @${username}:`, error);
+    return [];
+  }
+}
+
+// Function to join and participate in a Space
+async function joinSpace(scraper, spaceId, title) {
+  try {
+    console.log(`Joining Space: ${title} (${spaceId})`);
+    
+    // Check if the Space joining functionality exists
+    if (typeof scraper.joinSpace !== 'function') {
+      console.log('Space joining functionality not available in current twitter-agent version');
+      return null;
+    }
+    
+    const participant = await scraper.joinSpace(spaceId);
+    
+    // Only proceed with listener/speaker functionality if methods are available
+    if (typeof participant.joinAsListener === 'function') {
+      await participant.joinAsListener();
+      console.log('Joined Space as listener');
+      
+      // Set up event handlers if available
+      if (typeof participant.on === 'function') {
+        participant.on('chatMessage', (msg) => {
+          console.log(`Space chat message: ${msg.text}`);
+        });
+        
+        participant.on('speakerAdded', (evt) => {
+          console.log(`New speaker in Space: ${evt.username}`);
+        });
+      }
+      
+      // Request to speak if the functionality exists
+      if (typeof participant.requestSpeaker === 'function') {
+        try {
+          const { sessionUUID } = await participant.requestSpeaker();
+          console.log('Requested to speak in Space, waiting for approval...');
+          
+          if (typeof participant.on === 'function') {
+            participant.on('newSpeakerAccepted', async (evt) => {
+              if (evt.sessionUUID === sessionUUID && typeof participant.becomeSpeaker === 'function') {
+                await participant.becomeSpeaker();
+                console.log('Now a speaker in the Space!');
+                
+                // Auto-mute after becoming speaker (if the function exists)
+                if (typeof participant.muteSelf === 'function') {
+                  setTimeout(async () => {
+                    try {
+                      await participant.muteSelf();
+                      console.log('Auto-muted after becoming speaker');
+                    } catch (muteError) {
+                      console.error('Error auto-muting:', muteError);
+                    }
+                  }, 5000);
+                }
+              }
+            });
+          }
+        } catch (err) {
+          console.error('Failed to request speaker role:', err);
+        }
+      }
+    }
+    
+    // Set up cleanup handler
+    process.on('SIGINT', async () => {
+      try {
+        if (participant && typeof participant.leaveSpace === 'function') {
+          await participant.leaveSpace();
+          console.log('Left Space cleanly');
+        }
+      } catch (error) {
+        console.error('Error leaving Space:', error);
+      }
+      process.exit(0);
+    });
+    
+    return participant;
+  } catch (error) {
+    console.error('Error joining Space:', error);
+    return null;
+  }
+}
+
+// Update getTargetUserTweets to handle Spaces more gracefully
 async function getTargetUserTweets(agentId) {
   try {
-    // Fetch agent configuration
+    // Fetch agent configuration including post_configuration
     const { data: agentData, error: agentError } = await supabase
       .from('agents2')
-      .select('chat_configuration')
+      .select('chat_configuration, post_configuration')
       .eq('id', agentId)
       .single();
 
     if (agentError) throw agentError;
 
-    let chatConfig;
+    let chatConfig, postConfig;
     try {
       chatConfig = typeof agentData.chat_configuration === 'string' 
         ? JSON.parse(agentData.chat_configuration)
         : agentData.chat_configuration;
+      
+      postConfig = typeof agentData.post_configuration === 'string'
+        ? JSON.parse(agentData.post_configuration)
+        : agentData.post_configuration;
     } catch (parseError) {
-      console.error('Error parsing chat_configuration:', parseError);
+      console.error('Error parsing configuration:', parseError);
       return [];
     }
 
@@ -336,6 +449,10 @@ async function getTargetUserTweets(agentId) {
       console.log('No target usernames found in configuration');
       return [];
     }
+
+    // Get interval from post_configuration (default to 30 minutes if not specified)
+    const intervalMinutes = postConfig?.interval || 30;
+    console.log(`Using interval of ${intervalMinutes} minutes`);
 
     // Get Twitter credentials and set up scraper
     const credentials = await getTwitterCredentials(agentId);
@@ -347,11 +464,38 @@ async function getTargetUserTweets(agentId) {
     
     try {
       const allTweets = [];
+      const cutoffTime = new Date(Date.now() - intervalMinutes * 60 * 1000);
       
-      // Fetch tweets for each username
       for (const username of chatConfig.reply_to_usernames) {
+        // Get tweets
         const userTweets = await getLatestTweets(scraper, username);
-        allTweets.push(...userTweets);
+        
+        // Filter tweets by interval
+        const recentTweets = userTweets.filter(tweet => {
+          return tweet.timeParsed && tweet.timeParsed > cutoffTime;
+        });
+        
+        allTweets.push(...recentTweets);
+        
+        // Try to check for Spaces, but don't let it break the main functionality
+        try {
+          if (typeof scraper.searchSpaces === 'function') {
+            const liveSpaces = await findSpacesByUser(scraper, username);
+            if (liveSpaces.length > 0) {
+              console.log(`Found ${liveSpaces.length} live Spaces for @${username}`);
+              
+              // Join the first live Space
+              const spaceToJoin = liveSpaces[0];
+              const participant = await joinSpace(scraper, spaceToJoin.id, spaceToJoin.title);
+              
+              if (participant) {
+                console.log('Successfully joined Space');
+              }
+            }
+          }
+        } catch (spaceError) {
+          console.error('Error checking Spaces (continuing with tweets):', spaceError);
+        }
       }
 
       // Close the scraper after we're done
@@ -359,6 +503,7 @@ async function getTargetUserTweets(agentId) {
         await scraper.close();
       }
 
+      console.log(`Found ${allTweets.length} tweets within the last ${intervalMinutes} minutes`);
       return allTweets;
     } catch (error) {
       throw error;
@@ -394,24 +539,28 @@ async function getAIAnalysis(tweetText) {
 
     const data = await response.json();
     
-    // Extract the analysis from the nested response
-    let analysis;
-    if (data && typeof data === 'object') {
-      if (data.data && data.data.analysis) {
-        analysis = data.data.analysis;
-      } else if (data.result && data.result.description) {
-        analysis = data.result.description;
-      } else if (data.description) {
-        analysis = data.description;
-      } else if (data.data && typeof data.data === 'string') {
-        analysis = data.data;
-      } else if (data.result && typeof data.result === 'string') {
-        analysis = data.result;
-      } else {
-        analysis = JSON.stringify(data);
-      }
-    } else {
-      analysis = String(data);
+    // Handle error responses
+    if (data.error) {
+      console.error('AI analysis error:', data.error);
+      return null;
+    }
+    
+    // Extract the analysis, handling various response formats
+    let analysis = null;
+    if (data.data?.analysis) {
+      analysis = data.data.analysis;
+    } else if (data.result?.description) {
+      analysis = data.result.description;
+    } else if (typeof data.data === 'string') {
+      analysis = data.data;
+    } else if (typeof data.result === 'string') {
+      analysis = data.result;
+    }
+
+    // Validate the analysis
+    if (!analysis || typeof analysis !== 'string') {
+      console.error('Invalid AI analysis response:', data);
+      return null;
     }
 
     return analysis;
@@ -477,18 +626,32 @@ const rateLimiter = {
 // Function to reply to mentions
 async function replyToMentions(scraper, maxMentions = 10, delayMs = 2000, sinceHours = 24) {
   try {
-    const { username } = await scraper.getMyInfo();
-    if (!username) {
+    // Get username using searchTweets instead of getMyInfo
+    let myUsername = null;
+    try {
+      // Search for a tweet to get our own username from the auth context
+      const testSearch = scraper.searchTweets('', 1);
+      const searchResult = await testSearch.next();
+      if (!searchResult.done && searchResult.value) {
+        // The authenticated user's username should be available in the search context
+        myUsername = searchResult.value.authenticatedUsername;
+      }
+    } catch (searchError) {
+      console.error('Error determining username:', searchError);
+      throw new Error('Could not determine logged-in username');
+    }
+
+    if (!myUsername) {
       throw new Error('Could not determine logged-in username');
     }
 
     const mentions = [];
     const now = Date.now();
     
-    console.log(`Searching for mentions of @${username} in the last ${sinceHours} hours...`);
+    console.log(`Searching for mentions of @${myUsername} in the last ${sinceHours} hours...`);
     
     // Search for recent mentions
-    for await (const tweet of scraper.searchTweets(`@${username}`, maxMentions, SearchMode.Latest)) {
+    for await (const tweet of scraper.searchTweets(`@${myUsername}`, maxMentions, SearchMode.Latest)) {
       // Skip tweets older than sinceHours
       if (tweet.timeParsed && 
           (now - tweet.timeParsed.getTime()) > (sinceHours * 60 * 60 * 1000)) {
@@ -496,7 +659,7 @@ async function replyToMentions(scraper, maxMentions = 10, delayMs = 2000, sinceH
       }
       
       // Skip own tweets and already replied tweets
-      if (tweet.username === username || 
+      if (tweet.username === myUsername || 
           (tweet.isReply && tweet.inReplyToStatusId)) {
         continue;
       }
@@ -628,8 +791,10 @@ async function setupRealtimeSubscription() {
           // Get credentials and setup scraper for replies
           const credentials = await getTwitterCredentials(payload.new.agent_id);
           if (credentials) {
-            const scraper = await setupScraper(credentials);
+            let scraper = null;
             try {
+              scraper = await setupScraper(credentials);
+              
               // Reply to each fetched tweet
               for (const tweet of tweets) {
                 try {
@@ -653,15 +818,16 @@ async function setupRealtimeSubscription() {
                   continue;
                 }
               }
+              
+              // Process mentions while scraper is still valid
+              await replyToMentions(scraper, 10, 3000, 24);
+              
             } finally {
               if (scraper?.close) {
                 await scraper.close();
               }
             }
           }
-          
-          // Process mentions after handling fetched tweets
-          await replyToMentions(scraper, 10, 3000, 24);
         }
       }
     )
