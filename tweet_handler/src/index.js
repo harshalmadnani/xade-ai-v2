@@ -113,153 +113,24 @@ async function postTweet(twitterCredentials, tweetContent) {
       cookies: cookies ? `${typeof cookies === 'string' ? 'text format' : Array.isArray(cookies) ? cookies.length + ' cookies' : 'unknown format'}` : 'no cookies',
       agent_id: agent_id || 'missing'
     });
+
+    scraper = await setupScraper(twitterCredentials);
     
-    // If we have saved cookies, try to use them first
-    if (cookies) {
-      try {
-        console.log('Attempting to use saved cookies...');
-        
-        // Handle different cookie formats - with JSONB, cookies should already be in the correct format
-        let cookieArray;
-        if (typeof cookies === 'string') {
-          // If cookies is a string, try to parse it as JSON first
-          try {
-            cookieArray = JSON.parse(cookies);
-          } catch (parseError) {
-            // If not valid JSON, split by newlines or commas
-            cookieArray = cookies.includes('\n') 
-              ? cookies.split('\n').filter(c => c.trim()) 
-              : cookies.split(',').map(c => c.trim());
-          }
-        } else if (Array.isArray(cookies)) {
-          cookieArray = cookies;
-        } else {
-          throw new Error('Cookies are in an unsupported format');
-        }
-        
-        console.log(`Processed ${cookieArray.length} cookies`);
-        
-        // Use the fromCookies method as documented
-        scraper = await Scraper.fromCookies(cookieArray);
-        
-        // Test if cookies are still valid
-        const isLoggedIn = await scraper.isLoggedIn();
-        if (!isLoggedIn) {
-          throw new Error('Cookies are invalid or expired');
-        }
-        console.log('Cookies are valid, using existing session');
-      } catch (cookieError) {
-        console.log('Cookies expired or invalid, logging in again:', cookieError.message);
-        
-        // Create scraper with options directly
-        scraper = new Scraper({
-          timeout: 120000,  // Longer timeout
-          headless: false,  // Try with visible browser
-          slowMo: 100       // Slow down operations
-        });
-        
-        try {
-          console.log('Attempting login with username and password (alternative method)...');
-          const newCookies = await scraper.persistentLogin(username, password, email, twoFactorSecret);
-          
-          // Save the new cookies back to the database
-          const cookieStrings = newCookies.map(cookie => cookie.toString());
-          await updateTwitterCredentials(agent_id, cookieStrings);
-        } catch (retryError) {
-          console.error('Alternative login method also failed:', retryError);
-          throw retryError;
-        }
-      }
-    } else {
-      // No cookies available, perform a fresh login
-      console.log('No saved cookies, logging in to Twitter...');
-      
-      // Create scraper with options directly
-      scraper = new Scraper({
-        timeout: 120000,  // Longer timeout
-        headless: false,  // Try with visible browser
-        slowMo: 100       // Slow down operations
-      });
-      
-      try {
-        console.log(`Logging in with username: ${username}, email: ${email ? 'provided' : 'not provided'}`);
-        const newCookies = await scraper.persistentLogin(username, password, email, twoFactorSecret);
-        
-        // Save the cookies for future use
-        const cookieStrings = newCookies.map(cookie => cookie.toString());
-        await updateTwitterCredentials(agent_id, cookieStrings);
-      } catch (loginError) {
-        console.error('Login error details:', loginError);
-        
-        // If we get the "Missing data" error, try an alternative approach
-        if (loginError.message && loginError.message.includes('Missing data')) {
-          console.log('Detected "Missing data" error, trying alternative approach...');
-          
-          // Create a new scraper with different options
-          const altScraper = new Scraper({
-            timeout: 180000,    // Even longer timeout
-            headless: false,    // Non-headless mode
-            slowMo: 200,        // Slower operations
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
-          });
-          
-          try {
-            const newCookies = await altScraper.persistentLogin(username, password, email, twoFactorSecret);
-            const cookieStrings = newCookies.map(cookie => cookie.toString());
-            await updateTwitterCredentials(agent_id, cookieStrings);
-            
-            // Use this scraper for the tweet
-            scraper = altScraper;
-          } catch (altError) {
-            console.error('Alternative login approach also failed:', altError);
-            throw new Error(`Twitter login failed with both approaches: ${loginError.message}`);
-          }
-        } else {
-          throw new Error(`Twitter login failed: ${loginError.message}`);
-        }
-      }
-    }
-    
-    // Split content into tweets if it contains multiple paragraphs
-    const tweets = tweetContent
-      .split('\n\n')
-      .filter(tweet => tweet.trim().length > 0);
+    // Get only the first tweet (everything before the first blank line)
+    const firstTweet = tweetContent.split('\n\n')[0].trim();
+    console.log('Sending first tweet with content:', firstTweet);
+    const tweetResult = await scraper.sendTweet(firstTweet);
 
-    console.log(`Content will be split into ${tweets.length} tweets`);
-
-    let previousTweetId = null;
-    for (const [index, tweet] of tweets.entries()) {
-      // First tweet follows existing login logic
-      if (index === 0) {
-        scraper = await setupScraper(twitterCredentials);
-      }
-
-      console.log(`Sending tweet ${index + 1}/${tweets.length}`);
-      
-      // Send tweet as reply to previous tweet if it exists
-      const tweetResult = previousTweetId 
-        ? await scraper.sendTweet(tweet, previousTweetId)
-        : await scraper.sendTweet(tweet);
-
-      // Store the tweet ID for the next reply
-      previousTweetId = tweetResult.id;
-
-      // Add delay between tweets
-      if (index < tweets.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-    }
-
-    // Close browser after all tweets are sent
+    // Close browser after tweet is sent
     if (scraper?.close) {
       await scraper.close();
     }
 
-    console.log('Thread posted successfully!');
+    console.log('Tweet posted successfully!');
     return true;
 
   } catch (error) {
-    console.error('Error posting tweet thread:', error);
+    console.error('Error posting tweet:', error);
     
     // Try to close the scraper if it exists
     try {
@@ -268,7 +139,6 @@ async function postTweet(twitterCredentials, tweetContent) {
           await scraper.close();
           console.log('Closed scraper successfully');
         } else if (scraper.browser && typeof scraper.browser.close === 'function') {
-          // Try to close the browser directly if scraper.close doesn't exist
           await scraper.browser.close();
           console.log('Closed browser directly');
         } else {
@@ -332,7 +202,7 @@ async function getLatestTweets(scraper, username, count = 10, includeRetweets = 
   }
 }
 
-// Update getTargetUserTweets to remove Space logic
+// Update getTargetUserTweets to remove Spaces logic
 async function getTargetUserTweets(agentId) {
   try {
     // Fetch agent configuration including post_configuration
@@ -517,14 +387,14 @@ const rateLimiter = {
 };
 
 // Function to reply to mentions
-async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs = 2000, sinceHours = 24) {
+async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs = 2000, intervalMinutes = 30) {
   try {
     const myUsername = credentials.username;
     console.log('=== Starting replyToMentions ===');
     console.log(`Bot username: @${myUsername}`);
     console.log(`Max mentions to process: ${maxMentions}`);
     console.log(`Delay between replies: ${delayMs}ms`);
-    console.log(`Looking back: ${sinceHours} hours`);
+    console.log(`Looking back: ${intervalMinutes} minutes`);
 
     if (!myUsername) {
       console.error('ERROR: No username found in credentials:', credentials);
@@ -561,9 +431,9 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
           continue;
         }
 
-        // Skip tweets older than sinceHours
+        // Skip tweets older than intervalMinutes
         if (tweet.timeParsed && 
-            (now - tweet.timeParsed.getTime()) > (sinceHours * 60 * 60 * 1000)) {
+            (now - tweet.timeParsed.getTime()) > (intervalMinutes * 60 * 1000)) {
           skippedCount.old++;
           console.log('  ⏰ Skipped: Tweet too old');
           continue;
@@ -630,13 +500,14 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
 }
 
 // Function to handle replies to your tweets
-async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs = 2000) {
+async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs = 2000, intervalMinutes = 30) {
   try {
     const myUsername = credentials.username;
     console.log('=== Starting handleTweetReplies ===');
     console.log(`Bot username: @${myUsername}`);
     console.log(`Max tweets to check: ${maxTweets}`);
     console.log(`Delay between replies: ${delayMs}ms`);
+    console.log(`Looking back: ${intervalMinutes} minutes`);
 
     if (!myUsername) {
       console.error('ERROR: No username found in credentials:', credentials);
@@ -667,15 +538,24 @@ async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs 
       console.log(`Original tweet: "${tweet.text?.substring(0, 100)}..."`);
 
       try {
-        // Get replies to this tweet
-        const replies = await scraper.getTweetReplies(tweet.id);
+        // Use searchTweets to find replies to this tweet
+        const replies = [];
+        const replyQuery = `to:${myUsername} conversation_id:${tweet.id}`;
+        
+        for await (const reply of scraper.searchTweets(replyQuery, 10, 1)) {
+          // Skip own replies and the original tweet
+          if (reply.username !== myUsername && reply.id !== tweet.id) {
+            replies.push(reply);
+          }
+        }
+        
         console.log(`Found ${replies.length} replies to check`);
 
         // Process each reply
         for (const reply of replies) {
-          // Skip own replies
-          if (reply.username === myUsername) {
-            console.log(`  🤖 Skipping own reply from @${reply.username}`);
+          // Skip if the reply mentions the agent (will be handled by mentions system)
+          if (reply.text?.includes(`@${myUsername}`)) {
+            console.log(`  🔄 Skipping reply from @${reply.username} - contains mention, will be handled by mentions system`);
             continue;
           }
 
@@ -688,6 +568,14 @@ async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs 
 
           console.log(`\n  💬 Processing reply from @${reply.username}`);
           console.log(`  Reply text: "${reply.text?.substring(0, 100)}..."`);
+
+          // Add time filter for replies
+          const now = Date.now();
+          if (reply.timeParsed && 
+              (now - reply.timeParsed.getTime()) > (intervalMinutes * 60 * 1000)) {
+            console.log(`  ⏰ Skipped: Reply too old from @${reply.username}`);
+            continue;
+          }
 
           // Generate and send reply
           await rateLimiter.wait();
@@ -715,18 +603,23 @@ async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs 
   }
 }
 
-// Helper function to check if we've already replied
+// Update hasAlreadyReplied to use searchTweets instead
 async function hasAlreadyReplied(scraper, tweetId, myUsername) {
   try {
-    const replies = await scraper.getTweetReplies(tweetId);
-    return replies.some(reply => reply.username === myUsername);
+    const replyQuery = `from:${myUsername} conversation_id:${tweetId}`;
+    for await (const reply of scraper.searchTweets(replyQuery, 1, 1)) {
+      if (reply.username === myUsername) {
+        return true;
+      }
+    }
+    return false;
   } catch (error) {
     console.error(`Error checking for existing replies to ${tweetId}:`, error);
     return false;
   }
 }
 
-// Update setupRealtimeSubscription to remove Space checks
+// Update setupRealtimeSubscription to include target user tweet checks
 async function setupRealtimeSubscription() {
   const terminal2 = supabase
     .channel('custom-channel')
@@ -805,16 +698,58 @@ async function setupRealtimeSubscription() {
             let scraper = null;
             try {
               scraper = await setupScraper(credentials);
+              
+              // Get interval from post_configuration
+              const { data: agentData } = await supabase
+                .from('agents2')
+                .select('post_configuration')
+                .eq('id', payload.new.agent_id)
+                .single();
 
+              const postConfig = typeof agentData?.post_configuration === 'string'
+                ? JSON.parse(agentData.post_configuration)
+                : agentData?.post_configuration;
+
+              const intervalMinutes = postConfig?.interval || 30;
+              
               console.log('\n=== Starting Periodic Checks ===');
               
-              // Handle mentions first
+              // Pass intervalMinutes to all checks
               console.log('\n📨 Checking mentions...');
-              await replyToMentions(scraper, credentials, 10, 3000, 24);
+              await replyToMentions(scraper, credentials, 10, 3000, intervalMinutes);
               
-              // Then handle replies to our tweets
               console.log('\n💬 Checking replies to our tweets...');
-              await handleTweetReplies(scraper, credentials, 20, 3000);
+              await handleTweetReplies(scraper, credentials, 20, 3000, intervalMinutes);
+              
+              // getTargetUserTweets already uses intervalMinutes
+              console.log('\n🎯 Checking target users\' tweets...');
+              const targetTweets = await getTargetUserTweets(payload.new.agent_id);
+              
+              // Process and reply to target tweets
+              for (const tweet of targetTweets) {
+                try {
+                  // Check if we've already replied
+                  const hasReplied = await hasAlreadyReplied(scraper, tweet.id, credentials.username);
+                  if (hasReplied) {
+                    console.log(`Already replied to @${tweet.username}'s tweet`);
+                    continue;
+                  }
+
+                  // Generate and send reply
+                  await rateLimiter.wait();
+                  const customReplyText = await generateMentionReply(tweet);
+                  console.log(`Replying to @${tweet.username}'s tweet: "${customReplyText}"`);
+
+                  await scraper.sendTweet(customReplyText, tweet.id);
+                  console.log('Reply sent successfully');
+
+                  // Add delay between replies
+                  await new Promise(resolve => setTimeout(resolve, 3000));
+                } catch (replyError) {
+                  console.error(`Error replying to target tweet:`, replyError);
+                  continue;
+                }
+              }
               
               console.log('\n=== Completed All Checks ===');
               
