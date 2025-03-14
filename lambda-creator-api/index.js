@@ -115,7 +115,34 @@ exports.handler = async (event) => {
         }
     }
     
+    // Add function to get last 5 posts
+    async function getLastFivePosts() {
+        try {
+            const response = await fetch('${supabaseUrl}/rest/v1/terminal2?agent_id=eq.${userId}&select=tweet_content&order=created_at.desc&limit=5', {
+                method: 'GET',
+                headers: {
+                    'apikey': '${supabaseKey}',
+                    'Authorization': 'Bearer ${supabaseKey}'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch posts');
+            }
+
+            const posts = await response.json();
+            return posts.map(post => post.tweet_content).join('\\n');
+        } catch (error) {
+            console.error('Error fetching last posts:', error);
+            return '';
+        }
+    }
+    
     try {
+        // Get last 5 posts before making the analysis call
+        const lastPosts = await getLastFivePosts();
+        const enhancedSystemPrompt = '${systemPrompt.replace(/'/g, "\\'")}\\nYour last 5 posts are:\\n' + lastPosts;
+        
         console.log('Calling analysis API with query:', '${query.replace(/'/g, "\\'")}');
         
         // Call the analysis API using fetch
@@ -126,7 +153,7 @@ exports.handler = async (event) => {
             },
             body: JSON.stringify({
                 query: '${query.replace(/'/g, "\\'")}',
-                systemPrompt: '${systemPrompt.replace(/'/g, "\\'")}'
+                systemPrompt: enhancedSystemPrompt
             })
         });
         
