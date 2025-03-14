@@ -32,31 +32,18 @@ async function getTwitterCredentials(agentId) {
   // Parse twitter_credentials
   if (data?.twitter_credentials) {
     try {
-      // Check if the credentials are stored as a string in env var format
-      if (typeof data.twitter_credentials === 'string') {
-        console.log('Credentials stored as string, parsing...');
-        
-        // Parse the credentials from the env var format
-        const credentialLines = data.twitter_credentials.split('\n');
-        
-        credentialLines.forEach(line => {
-          // Handle both KEY=value and KEY="value" formats
-          const match = line.match(/^([^=]+)=(?:"([^"]*)"|([^"]*))$/);
-          if (match) {
-            const key = match[1].trim();
-            const value = (match[2] !== undefined ? match[2] : match[3]).trim();
-            
-            // Convert the env var keys to our expected format
-            if (key === 'TWITTER_USERNAME') credentials.username = value;
-            else if (key === 'TWITTER_PASSWORD') credentials.password = value;
-            else if (key === 'TWITTER_EMAIL') credentials.email = value;
-            else if (key === 'TWITTER_2FA_SECRET') credentials.twoFactorSecret = value;
-          }
-        });
-      } else {
-        // Credentials are already in object format
-        credentials = { ...data.twitter_credentials };
-      }
+      // Handle the new JSON format
+      const rawCredentials = typeof data.twitter_credentials === 'string' 
+        ? JSON.parse(data.twitter_credentials)
+        : data.twitter_credentials;
+
+      // Map the credentials to the expected format
+      credentials = {
+        username: rawCredentials['TWITTER_USERNAME='] || rawCredentials['TWITTER_USERNAME'],
+        password: rawCredentials['TWITTER_PASSWORD='] || rawCredentials['TWITTER_PASSWORD'],
+        email: rawCredentials['TWITTER_EMAIL='] || rawCredentials['TWITTER_EMAIL'],
+        twoFactorSecret: rawCredentials['TWITTER_2FA_SECRET='] || rawCredentials['TWITTER_2FA_SECRET']
+      };
     } catch (parseError) {
       console.error('Error parsing Twitter credentials:', parseError);
     }
