@@ -1,6 +1,6 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
-const { Scraper } = require('twitter-agent');
+const { Scraper, SpaceParticipant, SttTtsPlugin } = require('twitter-agent');
 const fs = require('fs');
 require('dotenv').config();
 
@@ -94,10 +94,9 @@ async function getTwitterCredentials(agentId) {
 
 // Function to post tweet using twitter-agent with cookie-based authentication
 async function postTweet(twitterCredentials, tweetContent) {
-  let scraper = null; // Declare scraper outside the try block so it's accessible in the catch block
+  let scraper = null;
   
   try {
-    // Check if twitterCredentials exists and has the necessary properties
     if (!twitterCredentials) {
       console.error('Twitter credentials are missing');
       return false;
@@ -221,23 +220,46 @@ async function postTweet(twitterCredentials, tweetContent) {
       }
     }
     
-    // Send the tweet
-    console.log('Sending tweet with content:', tweetContent);
-    const tweetResult = await scraper.sendTweet(tweetContent);
-    
-    // Close the browser session after sending the tweet
-    if (scraper && typeof scraper.close === 'function') {
-      await scraper.close();
-    } else if (scraper && scraper.browser && typeof scraper.browser.close === 'function') {
-      // Try to close the browser directly if scraper.close doesn't exist
-      await scraper.browser.close();
-      console.log('Closed browser directly');
+    // Split content into tweets if it contains multiple paragraphs
+    const tweets = tweetContent
+      .split('\n\n')
+      .filter(tweet => tweet.trim().length > 0);
+
+    console.log(`Content will be split into ${tweets.length} tweets`);
+
+    let previousTweetId = null;
+    for (const [index, tweet] of tweets.entries()) {
+      // First tweet follows existing login logic
+      if (index === 0) {
+        scraper = await setupScraper(twitterCredentials);
+      }
+
+      console.log(`Sending tweet ${index + 1}/${tweets.length}`);
+      
+      // Send tweet as reply to previous tweet if it exists
+      const tweetResult = previousTweetId 
+        ? await scraper.sendTweet(tweet, previousTweetId)
+        : await scraper.sendTweet(tweet);
+
+      // Store the tweet ID for the next reply
+      previousTweetId = tweetResult.id;
+
+      // Add delay between tweets
+      if (index < tweets.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
     }
-    
-    console.log('Tweet sent successfully!', tweetResult);
+
+    // Close browser after all tweets are sent
+    if (scraper?.close) {
+      await scraper.close();
+    }
+
+    console.log('Thread posted successfully!');
     return true;
+
   } catch (error) {
-    console.error('Error posting tweet:', error);
+    console.error('Error posting tweet thread:', error);
     
     // Try to close the scraper if it exists
     try {
@@ -310,116 +332,7 @@ async function getLatestTweets(scraper, username, count = 10, includeRetweets = 
   }
 }
 
-// Function to find live Spaces by username
-async function findSpacesByUser(scraper, username) {
-  try {
-    console.log(`Searching for Spaces hosted by @${username}...`);
-    
-    // Use searchSpaces if available
-    if (typeof scraper.searchSpaces === 'function') {
-      const spaces = await scraper.searchSpaces(`from:${username}`);
-      const liveSpaces = spaces.filter(space => space.state === 'Live');
-      
-      console.log(`Found ${liveSpaces.length} live Spaces for @${username}`);
-      return liveSpaces.map(space => ({
-        id: space.id,
-        title: space.title,
-        hostUsername: username,
-        participantCount: space.participant_count || 0
-      }));
-    } else {
-      // If no Spaces API is available
-      console.log('Spaces API not available in current twitter-agent version');
-      return [];
-    }
-  } catch (error) {
-    console.error(`Error finding Spaces for @${username}:`, error);
-    return [];
-  }
-}
-
-// Function to join and participate in a Space
-async function joinSpace(scraper, spaceId, title) {
-  try {
-    console.log(`Joining Space: ${title} (${spaceId})`);
-    
-    // Check if the Space joining functionality exists
-    if (typeof scraper.joinSpace !== 'function') {
-      console.log('Space joining functionality not available in current twitter-agent version');
-      return null;
-    }
-    
-    const participant = await scraper.joinSpace(spaceId);
-    
-    // Only proceed with listener/speaker functionality if methods are available
-    if (typeof participant.joinAsListener === 'function') {
-      await participant.joinAsListener();
-      console.log('Joined Space as listener');
-      
-      // Set up event handlers if available
-      if (typeof participant.on === 'function') {
-        participant.on('chatMessage', (msg) => {
-          console.log(`Space chat message: ${msg.text}`);
-        });
-        
-        participant.on('speakerAdded', (evt) => {
-          console.log(`New speaker in Space: ${evt.username}`);
-        });
-      }
-      
-      // Request to speak if the functionality exists
-      if (typeof participant.requestSpeaker === 'function') {
-        try {
-          const { sessionUUID } = await participant.requestSpeaker();
-          console.log('Requested to speak in Space, waiting for approval...');
-          
-          if (typeof participant.on === 'function') {
-            participant.on('newSpeakerAccepted', async (evt) => {
-              if (evt.sessionUUID === sessionUUID && typeof participant.becomeSpeaker === 'function') {
-                await participant.becomeSpeaker();
-                console.log('Now a speaker in the Space!');
-                
-                // Auto-mute after becoming speaker (if the function exists)
-                if (typeof participant.muteSelf === 'function') {
-                  setTimeout(async () => {
-                    try {
-                      await participant.muteSelf();
-                      console.log('Auto-muted after becoming speaker');
-                    } catch (muteError) {
-                      console.error('Error auto-muting:', muteError);
-                    }
-                  }, 5000);
-                }
-              }
-            });
-          }
-        } catch (err) {
-          console.error('Failed to request speaker role:', err);
-        }
-      }
-    }
-    
-    // Set up cleanup handler
-    process.on('SIGINT', async () => {
-      try {
-        if (participant && typeof participant.leaveSpace === 'function') {
-          await participant.leaveSpace();
-          console.log('Left Space cleanly');
-        }
-      } catch (error) {
-        console.error('Error leaving Space:', error);
-      }
-      process.exit(0);
-    });
-    
-    return participant;
-  } catch (error) {
-    console.error('Error joining Space:', error);
-    return null;
-  }
-}
-
-// Update getTargetUserTweets to handle Spaces more gracefully
+// Update getTargetUserTweets to remove Space logic
 async function getTargetUserTweets(agentId) {
   try {
     // Fetch agent configuration including post_configuration
@@ -476,26 +389,6 @@ async function getTargetUserTweets(agentId) {
         });
         
         allTweets.push(...recentTweets);
-        
-        // Try to check for Spaces, but don't let it break the main functionality
-        try {
-          if (typeof scraper.searchSpaces === 'function') {
-            const liveSpaces = await findSpacesByUser(scraper, username);
-            if (liveSpaces.length > 0) {
-              console.log(`Found ${liveSpaces.length} live Spaces for @${username}`);
-              
-              // Join the first live Space
-              const spaceToJoin = liveSpaces[0];
-              const participant = await joinSpace(scraper, spaceToJoin.id, spaceToJoin.title);
-              
-              if (participant) {
-                console.log('Successfully joined Space');
-              }
-            }
-          }
-        } catch (spaceError) {
-          console.error('Error checking Spaces (continuing with tweets):', spaceError);
-        }
       }
 
       // Close the scraper after we're done
@@ -833,7 +726,7 @@ async function hasAlreadyReplied(scraper, tweetId, myUsername) {
   }
 }
 
-// Update setupRealtimeSubscription to include reply handling
+// Update setupRealtimeSubscription to remove Space checks
 async function setupRealtimeSubscription() {
   const terminal2 = supabase
     .channel('custom-channel')
@@ -912,13 +805,21 @@ async function setupRealtimeSubscription() {
             let scraper = null;
             try {
               scraper = await setupScraper(credentials);
+
+              console.log('\n=== Starting Periodic Checks ===');
               
               // Handle mentions first
+              console.log('\n📨 Checking mentions...');
               await replyToMentions(scraper, credentials, 10, 3000, 24);
               
               // Then handle replies to our tweets
+              console.log('\n💬 Checking replies to our tweets...');
               await handleTweetReplies(scraper, credentials, 20, 3000);
               
+              console.log('\n=== Completed All Checks ===');
+              
+            } catch (error) {
+              console.error('Error during periodic checks:', error);
             } finally {
               if (scraper?.close) {
                 await scraper.close();
