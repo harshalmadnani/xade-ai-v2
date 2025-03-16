@@ -118,7 +118,7 @@ exports.handler = async (event) => {
     // Add function to get last 5 posts
     async function getLastFivePosts() {
         try {
-            const response = await fetch('${supabaseUrl}/rest/v1/terminal2?agent_id=eq.${userId}&select=tweet_content&order=created_at.desc&limit=5', {
+            const response = await fetch('${supabaseUrl}/rest/v1/terminal2?agent_id=eq.${userId}&select=tweet_content&order=created_at.desc&limit=10', {
                 method: 'GET',
                 headers: {
                     'apikey': '${supabaseKey}',
@@ -141,7 +141,7 @@ exports.handler = async (event) => {
     try {
         // Get last 5 posts before making the analysis call
         const lastPosts = await getLastFivePosts();
-        const enhancedSystemPrompt = '${systemPrompt.replace(/'/g, "\\'")}\\nYour last 5 posts are:\\n' + lastPosts;
+        const enhancedSystemPrompt = '${systemPrompt.replace(/'/g, "\\'")}\\n Dont repeat the content of your last 10 posts,Your last 10 posts are:\\n' + lastPosts;
         
         console.log('Calling analysis API with query:', '${query.replace(/'/g, "\\'")}');
         
