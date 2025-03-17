@@ -272,7 +272,7 @@ async function getTargetUserTweets(agentId) {
 // Function to get AI analysis for a tweet
 async function getAIAnalysis(tweetText) {
   try {
-    const response = await fetch('http://13.233.51.247:3004/api/analyze', {
+    const response = await fetch('https://api.xade.xyz/analyze', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'

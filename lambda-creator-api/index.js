@@ -142,11 +142,10 @@ exports.handler = async (event) => {
         // Get last 5 posts before making the analysis call
         const lastPosts = await getLastFivePosts();
         const enhancedSystemPrompt = '${systemPrompt.replace(/'/g, "\\'")}\\n If there is an error in data, dont mention the error in your post and instead just tweet about somethig relevant to your character prompt. Dont repeat the content of your last 10 posts,Your last 10 posts are:\\n' + lastPosts;
-        
         console.log('Calling analysis API with query:', 'Make a tweet about${query.replace(/'/g, "\\'")}');
         
         // Call the analysis API using fetch
-        const response = await fetch('http://13.233.51.247:3004/api/analyze', {
+        const response = await fetch('https://api.xade.xyz/analyze', { 
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
