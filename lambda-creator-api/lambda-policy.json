@@ -7,8 +7,12 @@
                 "lambda:CreateFunction",
                 "lambda:InvokeFunction",
                 "lambda:AddPermission",
+                "lambda:GetFunction",
+                "lambda:UpdateFunctionCode",
+                "lambda:UpdateFunctionConfiguration",
                 "events:PutRule",
                 "events:PutTargets",
+                "events:DescribeRule",
                 "iam:PassRole"
             ],
             "Resource": "*"
