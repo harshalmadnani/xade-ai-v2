@@ -279,7 +279,7 @@ async function getAIAnalysis(tweetText) {
       },
       body: JSON.stringify({
         query: tweetText,
-        systemPrompt: "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response. Keep responses concise and friendly. Don't use hashtags or emojis unless they were in the original tweet."
+        systemPrompt: "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response. Keep responses concise and friendly. Don't use hashtags or emojis unless they were in the original tweet, dont mention any data errors and keep it under 200 characters."
       })
     });
 
