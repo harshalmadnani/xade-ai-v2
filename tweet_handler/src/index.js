@@ -104,7 +104,13 @@ async function postTweet(twitterCredentials, tweetContent) {
     scraper = await setupScraper(twitterCredentials);
     
     // Get only the first tweet (everything before the first blank line)
-    const firstTweet = tweetContent.split('\n\n')[0].trim();
+    let firstTweet = tweetContent.split('\n\n')[0].trim();
+    
+    // Remove quotes from the beginning and end of the tweet content
+    if (firstTweet.startsWith('"') && firstTweet.endsWith('"')) {
+      firstTweet = firstTweet.substring(1, firstTweet.length - 1);
+    }
+    
     console.log('Sending first tweet with content:', firstTweet);
     const tweetResult = await scraper.sendTweet(firstTweet);
 
@@ -272,7 +278,7 @@ async function getTargetUserTweets(agentId) {
 // Function to get AI analysis for a tweet
 async function getAIAnalysis(tweetText) {
   try {
-    const response = await fetch('https://api.xade.xyz/analyze', {
+    const response = await fetch('https://analyze-slaz.onrender.com/analyze', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'

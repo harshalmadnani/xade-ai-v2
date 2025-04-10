@@ -145,7 +145,7 @@ exports.handler = async (event) => {
         console.log('Calling analysis API with query:', 'Make a tweet about${query.replace(/'/g, "\\'")}');
         
         // Call the analysis API using fetch
-        const response = await fetch('https://api.xade.xyz/analyze', { 
+        const response = await fetch('https://analyze-slaz.onrender.com/analyze', { 
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -153,6 +153,7 @@ exports.handler = async (event) => {
             body: JSON.stringify({
                 query: '${query.replace(/'/g, "\\'")}',
                 systemPrompt: enhancedSystemPrompt
+                
             })
         });
         
