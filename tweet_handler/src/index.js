@@ -227,7 +227,7 @@ async function getTargetUserTweets(agentId) {
     }
 
     // Get interval from post_configuration (default to 30 minutes if not specified)
-    const intervalMinutes = postConfig?.interval || 30;
+    const intervalMinutes = postConfig?.interval || 120;
     console.log(`Using interval of ${intervalMinutes} minutes`);
 
     // Get Twitter credentials and set up scraper
@@ -380,7 +380,7 @@ const rateLimiter = {
 };
 
 // Function to reply to mentions
-async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs = 2000, intervalMinutes = 30) {
+async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs = 2000, intervalMinutes = 120) {
   try {
     const myUsername = credentials.username;
     console.log('=== Starting replyToMentions ===');
