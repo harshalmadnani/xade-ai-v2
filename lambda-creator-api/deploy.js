@@ -110,7 +110,7 @@ async function deploy() {
                 console.log('Waiting for function update to complete...');
                 await sleep(5000); // Wait 5 seconds
                 
-                // Update configuration - remove AWS_REGION from environment variables
+                // Update configuration - AWS_REGION is automatically provided by Lambda
                 await lambda.updateFunctionConfiguration({
                     FunctionName: functionName,
                     Environment: {
@@ -118,7 +118,8 @@ async function deploy() {
                             SUPABASE_URL: process.env.SUPABASE_URL,
                             SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY,
                             AWS_ACCOUNT_ID: process.env.AWS_ACCOUNT_ID,
-                            LAMBDA_EXECUTION_ROLE: process.env.LAMBDA_EXECUTION_ROLE
+                            LAMBDA_EXECUTION_ROLE: process.env.LAMBDA_EXECUTION_ROLE,
+                            SUPER_MEME_API_TOKEN: process.env.SUPER_MEME_API_TOKEN || 'q2hdfDvhsm+QWr2mtjEgAb5xfe8='
                         }
                     },
                     Timeout: 60
@@ -158,7 +159,8 @@ async function deploy() {
                                 SUPABASE_URL: process.env.SUPABASE_URL,
                                 SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY,
                                 AWS_ACCOUNT_ID: process.env.AWS_ACCOUNT_ID,
-                                LAMBDA_EXECUTION_ROLE: process.env.LAMBDA_EXECUTION_ROLE
+                                LAMBDA_EXECUTION_ROLE: process.env.LAMBDA_EXECUTION_ROLE,
+                                SUPER_MEME_API_TOKEN: process.env.SUPER_MEME_API_TOKEN || 'q2hdfDvhsm+QWr2mtjEgAb5xfe8='
                             }
                         }
                     }).promise();
