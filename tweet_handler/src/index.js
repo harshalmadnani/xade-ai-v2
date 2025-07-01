@@ -173,8 +173,7 @@ function breakIntoSentenceBasedTweets(text, maxLength = 270) {
 
 // Function to break content using the original chunking logic
 function breakIntoRegularChunks(text, maxLength = 270) {
-  // Reserve space for thread indicators like " (1/3)"
-  const effectiveMaxLength = maxLength - 10;
+  const effectiveMaxLength = maxLength;
   
   if (text.length <= effectiveMaxLength) {
     return [text];
