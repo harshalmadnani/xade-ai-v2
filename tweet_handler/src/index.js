@@ -14,6 +14,41 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// Helper function to safely parse JSON configuration
+function safeParseConfiguration(configData, configType = 'configuration', agentId = 'unknown') {
+  if (!configData) {
+    console.log(`⚠️ No ${configType} found for agent:`, agentId);
+    return {};
+  }
+
+  if (typeof configData === 'object') {
+    return configData;
+  }
+
+  if (typeof configData === 'string') {
+    try {
+      console.log(`🔍 Parsing ${configType} for agent ${agentId}:`, configData.substring(0, 100) + '...');
+      return JSON.parse(configData);
+    } catch (parseError) {
+      console.error(`❌ Error parsing ${configType} for agent:`, agentId);
+      console.error('Parse error:', parseError.message);
+      
+      // Show context around the error position
+      const pos = parseInt(parseError.message.match(/\d+/)?.[0]) || 0;
+      const start = Math.max(0, pos - 50);
+      const end = Math.min(configData.length, pos + 50);
+      console.log(`🔍 Problematic ${configType} context:`, configData.substring(start, end));
+      
+      // Return empty object as fallback
+      console.log(`🔄 Using empty ${configType} as fallback`);
+      return {};
+    }
+  }
+
+  console.log(`⚠️ Unexpected ${configType} data type:`, typeof configData);
+  return {};
+}
+
 // Function to fetch Twitter credentials
 async function getTwitterCredentials(agentId) {
   const { data, error } = await supabase
@@ -79,7 +114,113 @@ async function getTwitterCredentials(agentId) {
   return credentials;
 }
 
-// Function to post tweet using twitter-agent with cookie-based authentication
+// Function to intelligently break long text into tweet-sized chunks
+function breakIntoTweetChunks(text, maxLength = 270) {
+  // Reserve space for thread indicators like " (1/3)"
+  const effectiveMaxLength = maxLength - 10;
+  
+  if (text.length <= effectiveMaxLength) {
+    return [text];
+  }
+
+  const chunks = [];
+  let remainingText = text.trim();
+  
+  // Check if this is a reply (starts with @username)
+  const isReply = remainingText.startsWith('@');
+  let mentionPart = '';
+  
+  if (isReply) {
+    // Extract the mention part to ensure it stays in the first tweet
+    const spaceIndex = remainingText.indexOf(' ');
+    if (spaceIndex !== -1) {
+      mentionPart = remainingText.substring(0, spaceIndex + 1);
+      remainingText = remainingText.substring(spaceIndex + 1);
+    }
+  }
+
+  while (remainingText.length > 0) {
+    // Calculate available space for this chunk
+    const availableSpace = chunks.length === 0 && isReply ? 
+      effectiveMaxLength - mentionPart.length : effectiveMaxLength;
+    
+    if (remainingText.length <= availableSpace) {
+      const finalChunk = chunks.length === 0 && isReply ? 
+        mentionPart + remainingText : remainingText;
+      chunks.push(finalChunk);
+      break;
+    }
+
+    // Try to break at sentence boundaries first
+    let breakPoint = -1;
+    const sentenceEnders = ['. ', '! ', '? ', '.\n', '!\n', '?\n'];
+    
+    for (let i = availableSpace; i >= availableSpace * 0.6; i--) {
+      const char = remainingText.substring(i - 1, i + 1);
+      if (sentenceEnders.some(ender => char === ender || char.endsWith(ender.trim()))) {
+        breakPoint = i;
+        break;
+      }
+    }
+
+    // If no sentence boundary found, try paragraph breaks
+    if (breakPoint === -1) {
+      for (let i = availableSpace; i >= availableSpace * 0.6; i--) {
+        if (remainingText.substring(i - 1, i + 1) === '\n\n') {
+          breakPoint = i;
+          break;
+        }
+      }
+    }
+
+    // If no paragraph break, try line breaks
+    if (breakPoint === -1) {
+      for (let i = availableSpace; i >= availableSpace * 0.6; i--) {
+        if (remainingText.charAt(i) === '\n') {
+          breakPoint = i + 1;
+          break;
+        }
+      }
+    }
+
+    // If no good break point, try word boundaries
+    if (breakPoint === -1) {
+      for (let i = availableSpace; i >= availableSpace * 0.7; i--) {
+        if (remainingText.charAt(i) === ' ') {
+          breakPoint = i;
+          break;
+        }
+      }
+    }
+
+    // Last resort: hard break at available space
+    if (breakPoint === -1) {
+      breakPoint = availableSpace;
+    }
+
+    let chunk = remainingText.substring(0, breakPoint).trim();
+    
+    // Add mention to first chunk if this is a reply
+    if (chunks.length === 0 && isReply) {
+      chunk = mentionPart + chunk;
+    }
+    
+    chunks.push(chunk);
+    remainingText = remainingText.substring(breakPoint).trim();
+  }
+
+  // Add thread indicators if multiple chunks
+  if (chunks.length > 1) {
+    for (let i = 0; i < chunks.length; i++) {
+      // Add simple thread indicator
+      chunks[i] += ` (${i + 1}/${chunks.length})`;
+    }
+  }
+
+  return chunks;
+}
+
+// Enhanced function to post tweet or thread using twitter-agent
 async function postTweet(twitterCredentials, tweetContent) {
   let scraper = null;
   
@@ -103,27 +244,104 @@ async function postTweet(twitterCredentials, tweetContent) {
 
     scraper = await setupScraper(twitterCredentials);
     
-    // Get only the first tweet (everything before the first blank line)
-    let firstTweet = tweetContent.split('\n\n')[0].trim();
+    // Get the full tweet content (not just first paragraph)
+    let fullContent = tweetContent.trim();
     
     // Remove quotes from the beginning and end of the tweet content
-    if (firstTweet.startsWith('"') && firstTweet.endsWith('"')) {
-      firstTweet = firstTweet.substring(1, firstTweet.length - 1);
+    if (fullContent.startsWith('"') && fullContent.endsWith('"')) {
+      fullContent = fullContent.substring(1, fullContent.length - 1);
     }
     
-    console.log('Sending first tweet with content:', firstTweet);
-    const tweetResult = await scraper.sendTweet(firstTweet);
+    // Break content into appropriate chunks
+    const tweetChunks = breakIntoTweetChunks(fullContent);
+    
+    console.log(`\n📝 CONTENT BREAKDOWN:`);
+    console.log(`Content will be posted as ${tweetChunks.length} tweet(s)`);
+    if (tweetChunks.length > 1) {
+      tweetChunks.forEach((chunk, i) => {
+        console.log(`Chunk ${i + 1}: "${chunk.substring(0, 50)}..."`);
+      });
+    }
+    console.log(`\n🚀 STARTING TWEET POSTING:`);
+    
+    if (tweetChunks.length === 1) {
+      // Single tweet
+      console.log('Posting single tweet:', tweetChunks[0]);
+      const result = await scraper.sendTweet(tweetChunks[0]);
+      console.log('✨ Tweet posted successfully!');
+    } else {
+      // Thread posting with improved ID extraction
+      console.log('🧵 Posting thread with', tweetChunks.length, 'tweets');
+      
+      try {
+        let lastTweetId = null;
+        
+        for (let i = 0; i < tweetChunks.length; i++) {
+          const chunk = tweetChunks[i];
+          console.log(`Posting tweet ${i + 1}/${tweetChunks.length}:`, chunk);
+          
+          let tweetResult;
+          
+          if (i === 0) {
+            // First tweet in thread
+            tweetResult = await scraper.sendTweet(chunk);
+          } else if (lastTweetId) {
+            // Reply to the previous tweet to create thread
+            tweetResult = await scraper.sendTweet(chunk, lastTweetId);
+          } else {
+            // Fallback: post as standalone tweet
+            console.log('⚠️ No previous tweet ID available, posting as standalone tweet');
+            tweetResult = await scraper.sendTweet(chunk);
+          }
+          
+          // Try multiple ways to extract tweet ID
+          let newTweetId = null;
+          if (tweetResult) {
+            // Try different possible response structures
+            newTweetId = tweetResult.id || 
+                        tweetResult.data?.id || 
+                        tweetResult.tweet?.id ||
+                        tweetResult.id_str ||
+                        tweetResult.data?.id_str;
+            
+            // If it's a string that looks like a tweet ID
+            if (typeof tweetResult === 'string' && /^\d+$/.test(tweetResult)) {
+              newTweetId = tweetResult;
+            }
+          }
+          
+          if (newTweetId) {
+            lastTweetId = newTweetId;
+            console.log(`✅ Tweet ${i + 1}/${tweetChunks.length} posted with ID: ${newTweetId}`);
+          } else {
+            console.log(`✅ Tweet ${i + 1}/${tweetChunks.length} posted (ID not available)`);
+            console.log('🔍 Tweet result structure:', typeof tweetResult, tweetResult ? Object.keys(tweetResult) : 'null');
+          }
+          
+          // Add delay between tweets
+          if (i < tweetChunks.length - 1) {
+            const delay = i === 0 ? 5000 : 3000; // Longer delay after first tweet
+            console.log(`⏳ Waiting ${delay/1000} seconds before next tweet...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+        
+        console.log('🎉 Thread posting completed!');
+      } catch (threadError) {
+        console.error('❌ Error during thread posting:', threadError);
+        throw threadError;
+      }
+    }
 
-    // Close browser after tweet is sent
+    // Close browser after tweets are sent
     if (scraper?.close) {
       await scraper.close();
     }
 
-    console.log('Tweet posted successfully!');
     return true;
 
   } catch (error) {
-    console.error('Error posting tweet:', error);
+    console.error('Error posting tweet/thread:', error);
     
     // Try to close the scraper if it exists
     try {
@@ -170,24 +388,36 @@ async function updateTwitterCredentials(agentId, cookieStrings) {
   }
 }
 
-// Function to get latest tweets for a user
-async function getLatestTweets(scraper, username, count = 10, includeRetweets = false) {
+// Function to get latest tweets for a user (now includes quote tweets)
+async function getLatestTweets(scraper, username, count = 10, includeRetweets = false, includeQuoteTweets = true) {
   const tweets = [];
   try {
-    const timeline = scraper.getTweets(username, count);
+    const timeline = scraper.getTweets(username, count * 2); // Get more to account for filtering
     
     for await (const tweet of timeline) {
-      // Skip retweets and quote tweets
-      if (!includeRetweets && (tweet.isRetweet || tweet.isQuoted)) {
+      // Skip retweets unless explicitly requested
+      if (tweet.isRetweet && !includeRetweets) {
         continue;
       }
+      
+      // Include quote tweets by default since we can now handle them
+      if (tweet.isQuoted && !includeQuoteTweets) {
+        continue;
+      }
+      
       tweets.push(tweet);
       if (tweets.length >= count) {
         break;
       }
     }
     
-    console.log(`Retrieved ${tweets.length} original tweets from @${username}`);
+    const tweetTypes = tweets.map(t => {
+      if (t.isRetweet) return 'RT';
+      if (t.isQuoted) return 'QT';
+      return 'Original';
+    });
+    
+    console.log(`Retrieved ${tweets.length} tweets from @${username} (Types: ${tweetTypes.join(', ')})`);
     return tweets;
   } catch (error) {
     console.error(`Error fetching tweets for @${username}:`, error);
@@ -207,19 +437,9 @@ async function getTargetUserTweets(agentId) {
 
     if (agentError) throw agentError;
 
-    let chatConfig, postConfig;
-    try {
-      chatConfig = typeof agentData.chat_configuration === 'string' 
-        ? JSON.parse(agentData.chat_configuration)
-        : agentData.chat_configuration;
-      
-      postConfig = typeof agentData.post_configuration === 'string'
-        ? JSON.parse(agentData.post_configuration)
-        : agentData.post_configuration;
-    } catch (parseError) {
-      console.error('Error parsing configuration:', parseError);
-      return [];
-    }
+    // Parse configurations using helper function
+    const chatConfig = safeParseConfiguration(agentData.chat_configuration, 'chat_configuration', agentId);
+    const postConfig = safeParseConfiguration(agentData.post_configuration, 'post_configuration', agentId);
 
     if (!chatConfig?.reply_to_usernames?.length) {
       console.log('No target usernames found in configuration');
@@ -275,17 +495,110 @@ async function getTargetUserTweets(agentId) {
   }
 }
 
-// Function to get AI analysis for a tweet
-async function getAIAnalysis(tweetText) {
+// Function to extract comprehensive tweet content including quoted tweets
+function extractTweetContent(tweet) {
+  let fullContent = tweet.text || '';
+  let contextInfo = {
+    hasQuotedTweet: false,
+    quotedAuthor: null,
+    quotedText: null,
+    isReply: tweet.isReply || false,
+    replyToUsername: null,
+    tweetType: 'original'
+  };
+
+  // Determine tweet type
+  if (tweet.isRetweet) {
+    contextInfo.tweetType = 'retweet';
+  } else if (tweet.isQuoted) {
+    contextInfo.tweetType = 'quote_tweet';
+  } else if (tweet.isReply) {
+    contextInfo.tweetType = 'reply';
+  }
+
+  // Handle quoted tweets - check multiple possible structures
+  let quotedTweetData = null;
+  
+  if (tweet.quotedTweet) {
+    quotedTweetData = tweet.quotedTweet;
+  } else if (tweet.quotedStatus) {
+    quotedTweetData = tweet.quotedStatus;
+  } else if (tweet.quoted_status) {
+    quotedTweetData = tweet.quoted_status;
+  } else if (tweet.retweetedTweet && tweet.isQuoted) {
+    // Sometimes quoted tweets are stored in retweetedTweet
+    quotedTweetData = tweet.retweetedTweet;
+  }
+
+  if (quotedTweetData) {
+    contextInfo.hasQuotedTweet = true;
+    contextInfo.quotedAuthor = quotedTweetData.username || quotedTweetData.user?.screen_name || quotedTweetData.user?.username;
+    contextInfo.quotedText = quotedTweetData.text || quotedTweetData.full_text;
+    
+    if (contextInfo.quotedAuthor && contextInfo.quotedText) {
+      // Append quoted content to main content for analysis
+      fullContent += `\n\n[QUOTED TWEET by @${contextInfo.quotedAuthor}]: ${contextInfo.quotedText}`;
+      console.log(`📄 Extracted quoted tweet from @${contextInfo.quotedAuthor}`);
+    }
+  }
+
+  // Handle reply context
+  if (tweet.isReply) {
+    contextInfo.replyToUsername = tweet.inReplyToUsername || tweet.in_reply_to_screen_name;
+  }
+
+  // Additional context extraction
+  if (tweet.urls && tweet.urls.length > 0) {
+    contextInfo.hasUrls = true;
+  }
+  
+  if (tweet.hashtags && tweet.hashtags.length > 0) {
+    contextInfo.hasHashtags = true;
+  }
+
+  return { fullContent, contextInfo };
+}
+
+// Enhanced function to get AI analysis for a tweet with context
+async function getAIAnalysis(tweet) {
   try {
+    const { fullContent, contextInfo } = extractTweetContent(tweet);
+    
+    // Create enhanced system prompt based on context
+    let systemPrompt = "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response under 200 characters no hashtags.";
+    
+    if (contextInfo.hasQuotedTweet) {
+      systemPrompt += ` The tweet is a QUOTE TWEET that includes content from @${contextInfo.quotedAuthor}. The user is sharing someone else's tweet with their own commentary. Consider BOTH the user's commentary AND the quoted content when crafting your response. You can:
+      - Respond to the user's opinion/commentary about the quoted tweet
+      - Add your perspective on the quoted content
+      - Find connections between the user's take and the original content
+      - Acknowledge both the user's insight and the quoted material
+      Make your response relevant to this quote tweet context.`;
+    }
+    
+    if (contextInfo.isReply) {
+      systemPrompt += " This appears to be part of a conversation thread. Keep your response conversational and contextually appropriate to continue the discussion.";
+    }
+    
+    if (contextInfo.tweetType === 'retweet') {
+      systemPrompt += " This is a retweet, so the user is sharing someone else's content. Frame your response acknowledging that they found this content worth sharing.";
+    }
+
+    console.log('Analyzing tweet with full context:', {
+      hasQuotedTweet: contextInfo.hasQuotedTweet,
+      quotedAuthor: contextInfo.quotedAuthor,
+      isReply: contextInfo.isReply,
+      contentLength: fullContent.length
+    });
+
     const response = await fetch('https://analyze-slaz.onrender.com/analyze', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        query: tweetText,
-        systemPrompt: "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response. Keep responses concise and friendly. Don't use hashtags or emojis unless they were in the original tweet, dont mention any errors what so ever and keep it under 200 characters."
+        query: fullContent,
+        systemPrompt: systemPrompt
       })
     });
 
@@ -319,40 +632,138 @@ async function getAIAnalysis(tweetText) {
       return null;
     }
 
-    return analysis;
+    return { analysis, contextInfo };
   } catch (error) {
     console.error('Error getting AI analysis:', error);
     return null;
   }
 }
 
-// Update the generateMentionReply function to use AI analysis
+// Function to post a reply or reply thread
+async function postReplyOrThread(scraper, replyContent, originalTweetId, delayMs = 3000) {
+  try {
+    // Break reply into chunks if needed
+    const replyChunks = breakIntoTweetChunks(replyContent);
+    
+    if (replyChunks.length === 1) {
+      // Single reply
+      console.log(`📤 Posting single reply: "${replyChunks[0]}"`);
+      await scraper.sendTweet(replyChunks[0], originalTweetId);
+      return true;
+    } else {
+      // Reply thread
+      console.log(`🧵 Posting reply thread with ${replyChunks.length} tweets`);
+      
+      let currentReplyToId = originalTweetId;
+      
+      for (let i = 0; i < replyChunks.length; i++) {
+        const chunk = replyChunks[i];
+        console.log(`📤 Posting reply ${i + 1}/${replyChunks.length}: "${chunk.substring(0, 80)}${chunk.length > 80 ? '...' : ''}"`);
+        
+        const tweetResult = await scraper.sendTweet(chunk, currentReplyToId);
+        
+        // Try to extract tweet ID for next reply in chain
+        let newTweetId = null;
+        if (tweetResult) {
+          newTweetId = tweetResult.id || 
+                      tweetResult.data?.id || 
+                      tweetResult.tweet?.id ||
+                      tweetResult.id_str ||
+                      tweetResult.data?.id_str;
+          
+          if (typeof tweetResult === 'string' && /^\d+$/.test(tweetResult)) {
+            newTweetId = tweetResult;
+          }
+        }
+        
+        if (newTweetId) {
+          currentReplyToId = newTweetId;
+          console.log(`✅ Reply ${i + 1}/${replyChunks.length} posted with ID: ${newTweetId}`);
+        } else {
+          console.log(`✅ Reply ${i + 1}/${replyChunks.length} posted (ID not extracted, may break thread chain)`);
+          console.log('🔍 Reply result structure:', typeof tweetResult, tweetResult ? Object.keys(tweetResult) : 'null');
+          // Keep using the original tweet ID as fallback
+        }
+        
+        // Add delay between thread replies
+        if (i < replyChunks.length - 1) {
+          console.log(`⏳ Waiting ${delayMs}ms before next reply in thread...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      }
+      
+      console.log('🎉 Reply thread posting completed!');
+      return true;
+    }
+  } catch (error) {
+    console.error('❌ Error posting reply thread:', error);
+    return false;
+  }
+}
+
+// Enhanced generateMentionReply function with improved context handling
 async function generateMentionReply(tweet) {
   try {
-    const analysis = await getAIAnalysis(tweet.text || '');
+    console.log(`\n🤖 Generating reply for @${tweet.username}...`);
     
-    if (analysis) {
-      // Ensure the reply starts with the username mention
-      if (!analysis.startsWith(`@${tweet.username}`)) {
-        return `@${tweet.username} ${analysis}`;
+    // Get AI analysis with enhanced context
+    const aiResult = await getAIAnalysis(tweet);
+    
+    if (aiResult && aiResult.analysis) {
+      const { analysis, contextInfo } = aiResult;
+      
+      // Log context information
+      if (contextInfo.hasQuotedTweet) {
+        console.log(`📝 Tweet contains quoted content from @${contextInfo.quotedAuthor}`);
       }
-      return analysis;
+      
+      // Ensure the reply starts with the username mention
+      let finalReply = analysis;
+      if (!analysis.startsWith(`@${tweet.username}`)) {
+        finalReply = `@${tweet.username} ${analysis}`;
+      }
+      
+      // Check if reply will need threading
+      const chunks = breakIntoTweetChunks(finalReply);
+      if (chunks.length > 1) {
+        console.log(`📝 AI generated a long response that will be posted as ${chunks.length} tweets in a thread`);
+      }
+      
+      console.log(`✨ AI-generated reply: "${finalReply.substring(0, 100)}${finalReply.length > 100 ? '...' : ''}"`);
+      return finalReply;
     }
     
-    // Fallback to default responses if AI analysis fails
-    let replyText = `@${tweet.username} `;
-    const tweetText = tweet.text?.toLowerCase() || '';
+    // Enhanced fallback logic with context awareness
+    console.log('⚠️ AI analysis failed, using enhanced fallback logic...');
     
-    if (tweetText.includes('help') || tweetText.includes('how')) {
+    const { fullContent, contextInfo } = extractTweetContent(tweet);
+    let replyText = `@${tweet.username} `;
+    const tweetText = fullContent.toLowerCase();
+    
+    // Context-aware fallback responses
+    if (contextInfo.hasQuotedTweet) {
+      if (tweetText.includes('agree') || tweetText.includes('disagree')) {
+        replyText += "Interesting perspective on this topic! Thanks for sharing.";
+      } else if (tweetText.includes('what do you think') || tweetText.includes('thoughts')) {
+        replyText += "That's a thought-provoking quote tweet! I appreciate you sharing your take.";
+      } else {
+        replyText += "Thanks for sharing this with your commentary!";
+      }
+    } else if (tweetText.includes('help') || tweetText.includes('how')) {
       replyText += "I'll be happy to help! Please provide more details.";
     } else if (tweetText.includes('thanks') || tweetText.includes('thank you')) {
       replyText += "You're welcome! Let me know if you need anything else.";
     } else if (tweetText.includes('question')) {
       replyText += "I'll do my best to answer your question. What would you like to know?";
+    } else if (tweetText.includes('opinion') || tweetText.includes('think')) {
+      replyText += "That's an interesting point! I appreciate you sharing your thoughts.";
+    } else if (contextInfo.isReply) {
+      replyText += "Thanks for continuing the conversation!";
     } else {
       replyText += "Thanks for reaching out! I appreciate your message.";
     }
     
+    console.log(`🔄 Fallback reply: "${replyText}"`);
     return replyText;
   } catch (error) {
     console.error('Error generating reply:', error);
@@ -413,6 +824,10 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
           username: tweet.username,
           text: tweet.text?.substring(0, 50),
           isReply: tweet.isReply,
+          isQuoted: tweet.isQuoted,
+          isRetweet: tweet.isRetweet,
+          hasQuotedTweet: !!(tweet.quotedTweet || tweet.quotedStatus),
+          quotedAuthor: tweet.quotedTweet?.username || tweet.quotedStatus?.username,
           inReplyToStatusId: tweet.inReplyToStatusId,
           timeParsed: tweet.timeParsed
         });
@@ -461,18 +876,32 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
       }
 
       try {
-        console.log(`\n📝 Processing reply to @${tweet.username}`);
+        const tweetType = tweet.isRetweet ? 'retweet' : 
+                         tweet.isQuoted ? 'quote tweet' : 
+                         tweet.isReply ? 'reply' : 'original tweet';
+        
+        console.log(`\n📝 Processing reply to @${tweet.username} (${tweetType})`);
         console.log(`Original tweet: "${tweet.text?.substring(0, 100)}..."`);
+        
+        if (tweet.quotedTweet || tweet.quotedStatus) {
+          const quotedAuthor = tweet.quotedTweet?.username || tweet.quotedStatus?.username;
+          const quotedText = tweet.quotedTweet?.text || tweet.quotedStatus?.text;
+          console.log(`📄 Quoted content from @${quotedAuthor}: "${quotedText?.substring(0, 80)}..."`);
+        }
         
         await rateLimiter.wait();
         console.log('Rate limit respected');
         
         const customReplyText = await generateMentionReply(tweet);
-        console.log(`Generated reply: "${customReplyText}"`);
+        console.log(`Generated reply: "${customReplyText.substring(0, 100)}${customReplyText.length > 100 ? '...' : ''}"`);
         
-        // Use sendTweet instead of tweet
-        await scraper.sendTweet(customReplyText, tweet.id);
-        console.log('✨ Reply sent successfully');
+        // Use postReplyOrThread to handle long replies
+        const replySuccess = await postReplyOrThread(scraper, customReplyText, tweet.id, delayMs);
+        if (replySuccess) {
+          console.log('✨ Reply sent successfully');
+        } else {
+          console.log('❌ Failed to send reply');
+        }
         
         if (mentions.indexOf(tweet) < mentions.length - 1) {
           console.log(`⏳ Waiting ${delayMs}ms before next reply...`);
@@ -493,7 +922,7 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
 }
 
 // Function to handle replies to your tweets
-async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs = 2000, intervalMinutes = 30) {
+async function handleTweetReplies(scraper, credentials, maxTweets = 5, delayMs = 2000, intervalMinutes = 30) {
   try {
     const myUsername = credentials.username;
     console.log('=== Starting handleTweetReplies ===');
@@ -573,10 +1002,14 @@ async function handleTweetReplies(scraper, credentials, maxTweets = 20, delayMs 
           // Generate and send reply
           await rateLimiter.wait();
           const customReplyText = await generateMentionReply(reply);
-          console.log(`  Generated response: "${customReplyText}"`);
+          console.log(`  Generated response: "${customReplyText.substring(0, 100)}${customReplyText.length > 100 ? '...' : ''}"`);
 
-          await scraper.sendTweet(customReplyText, reply.id);
-          console.log(`  ✨ Reply sent successfully`);
+          const replySuccess = await postReplyOrThread(scraper, customReplyText, reply.id, delayMs);
+          if (replySuccess) {
+            console.log(`  ✨ Reply sent successfully`);
+          } else {
+            console.log(`  ❌ Failed to send reply`);
+          }
 
           // Add delay between replies
           await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -699,9 +1132,7 @@ async function setupRealtimeSubscription() {
                 .eq('id', payload.new.agent_id)
                 .single();
 
-              const postConfig = typeof agentData?.post_configuration === 'string'
-                ? JSON.parse(agentData.post_configuration)
-                : agentData?.post_configuration;
+              const postConfig = safeParseConfiguration(agentData?.post_configuration, 'post_configuration', payload.new.agent_id);
 
               const intervalMinutes = postConfig?.interval || 30;
               
@@ -712,7 +1143,7 @@ async function setupRealtimeSubscription() {
               await replyToMentions(scraper, credentials, 10, 3000, intervalMinutes);
               
               console.log('\n💬 Checking replies to our tweets...');
-              await handleTweetReplies(scraper, credentials, 20, 3000, intervalMinutes);
+              await handleTweetReplies(scraper, credentials, 5, 3000, intervalMinutes);
               
               // getTargetUserTweets already uses intervalMinutes
               console.log('\n🎯 Checking target users\' tweets...');
@@ -728,18 +1159,35 @@ async function setupRealtimeSubscription() {
                     continue;
                   }
 
+                  const tweetType = tweet.isRetweet ? 'retweet' : 
+                                   tweet.isQuoted ? 'quote tweet' : 
+                                   tweet.isReply ? 'reply' : 'original tweet';
+                  
+                  console.log(`\n🎯 Processing target user tweet from @${tweet.username} (${tweetType})`);
+                  console.log(`Tweet content: "${tweet.text?.substring(0, 100)}..."`);
+                  
+                  if (tweet.quotedTweet || tweet.quotedStatus) {
+                    const quotedAuthor = tweet.quotedTweet?.username || tweet.quotedStatus?.username;
+                    const quotedText = tweet.quotedTweet?.text || tweet.quotedStatus?.text;
+                    console.log(`📄 Quoted content from @${quotedAuthor}: "${quotedText?.substring(0, 80)}..."`);
+                  }
+
                   // Generate and send reply
                   await rateLimiter.wait();
                   const customReplyText = await generateMentionReply(tweet);
-                  console.log(`Replying to @${tweet.username}'s tweet: "${customReplyText}"`);
+                  console.log(`Generated reply: "${customReplyText.substring(0, 100)}${customReplyText.length > 100 ? '...' : ''}"`);
 
-                  await scraper.sendTweet(customReplyText, tweet.id);
-                  console.log('Reply sent successfully');
+                  const replySuccess = await postReplyOrThread(scraper, customReplyText, tweet.id, 3000);
+                  if (replySuccess) {
+                    console.log('✨ Reply sent successfully');
+                  } else {
+                    console.log('❌ Failed to send reply');
+                  }
 
                   // Add delay between replies
                   await new Promise(resolve => setTimeout(resolve, 3000));
                 } catch (replyError) {
-                  console.error(`Error replying to target tweet:`, replyError);
+                  console.error(`❌ Error replying to target tweet:`, replyError);
                   continue;
                 }
               }

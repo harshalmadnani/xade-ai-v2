@@ -141,19 +141,30 @@ exports.handler = async (event) => {
     try {
         // Get last 5 posts before making the analysis call
         const lastPosts = await getLastFivePosts();
-        const enhancedSystemPrompt = '${systemPrompt.replace(/'/g, "\\'")}\\n If there is an error in data, dont mention the error in your post and instead just tweet about somethig relevant to your character prompt. Dont repeat the content of your last 10 posts,Your last 10 posts are:\\n' + lastPosts;
-        console.log('Calling analysis API with query:', 'Make a tweet about${query.replace(/'/g, "\\'")}');
+        const enhancedSystemPrompt = '${systemPrompt.replace(/'/g, "\\'")}\\n\\nIf there is an error in data, don\'t mention the error in your post and instead just tweet about something relevant to your character prompt. Don\'t repeat the content of your last 10 posts.\\n\\nYour last 10 posts are:\\n' + lastPosts;
+        console.log('Calling Grok API with query:', '${query.replace(/'/g, "\\'")}');
         
-        // Call the analysis API using fetch
-        const response = await fetch('https://analyze-slaz.onrender.com/analyze', { 
+        // Call the Grok API using fetch
+        const response = await fetch('https://api.x.ai/v1/chat/completions', { 
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer xai-SqkCtzN0m0QoCG9Lq9lyZGBZiWw2iMxVqYKjYkpQZly0rj72vGDsrbB65yBZJ94aYOnzrUXs9tSZ5Ye5'
             },
             body: JSON.stringify({
-                query: '${query.replace(/'/g, "\\'")}',
-                systemPrompt: enhancedSystemPrompt
-                
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": enhancedSystemPrompt
+                    },
+                    {
+                        "role": "user",
+                        "content": '${query.replace(/'/g, "\\'")}'
+                    }
+                ],
+                "model": "grok-3-latest",
+                "stream": false,
+                "temperature": 0
             })
         });
         
@@ -167,23 +178,12 @@ exports.handler = async (event) => {
         // Store only the description from the result in Supabase
         let description;
         try {
-            // Extract specifically the analysis field from the nested structure
-            if (data && typeof data === 'object') {
-                if (data.data && data.data.analysis) {
-                    description = data.data.analysis;
-                } else if (data.result && data.result.description) {
-                    description = data.result.description;
-                } else if (data.description) {
-                    description = data.description;
-                } else if (data.data && typeof data.data === 'string') {
-                    description = data.data;
-                } else if (data.result && typeof data.result === 'string') {
-                    description = data.result;
-                } else {
-                    description = JSON.stringify(data);
-                }
+            // Extract content from Grok response
+            if (data && data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
+                description = data.choices[0].message.content;
             } else {
-                description = String(data);
+                console.error('Could not extract content from Grok response. Full response:', JSON.stringify(data));
+                description = JSON.stringify(data); // Store full response if content not found
             }
             
             // Ensure description is a string and not too large
