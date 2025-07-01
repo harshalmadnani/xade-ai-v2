@@ -138,33 +138,51 @@ exports.handler = async (event) => {
         }
     }
     
+    // Add function to get system prompt from Supabase
+    async function getSystemPrompt() {
+        try {
+            const response = await fetch('${supabaseUrl}/rest/v1/agents?user_id=eq.${userId}&select=system_prompt&limit=1', {
+                method: 'GET',
+                headers: {
+                    'apikey': '${supabaseKey}',
+                    'Authorization': 'Bearer ${supabaseKey}'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch system prompt');
+            }
+
+            const agents = await response.json();
+            if (agents && agents.length > 0 && agents[0].system_prompt) {
+                return agents[0].system_prompt;
+            }
+            
+            // Fallback system prompt if none found
+            return 'You are a helpful AI assistant that creates engaging social media content.';
+        } catch (error) {
+            console.error('Error fetching system prompt:', error);
+            // Fallback system prompt on error
+            return 'You are a helpful AI assistant that creates engaging social media content.';
+        }
+    }
+    
     try {
-        // Get last 5 posts before making the analysis call
+        // Get system prompt and last 5 posts before making the analysis call
+        const systemPrompt = await getSystemPrompt();
         const lastPosts = await getLastFivePosts();
-        const enhancedSystemPrompt = '${systemPrompt.replace(/'/g, "\\'")}\\n\\nIf there is an error in data, don\'t mention the error in your post and instead just tweet about something relevant to your character prompt. Don\'t repeat the content of your last 10 posts.\\n\\nYour last 10 posts are:\\n' + lastPosts;
-        console.log('Calling Grok API with query:', '${query.replace(/'/g, "\\'")}');
+        const enhancedSystemPrompt = systemPrompt + '\\n If there is an error in data, dont mention the error in your post and instead just tweet about somethig relevant to your character prompt. Dont repeat the content of your last 10 posts,Your last 10 posts are:\\n' + lastPosts;
+        console.log('Calling analysis API with query:', 'Make a tweet about${query.replace(/'/g, "\\'")}');
         
-        // Call the Grok API using fetch
-        const response = await fetch('https://api.x.ai/v1/chat/completions', { 
+        // Call the analysis API using fetch
+        const response = await fetch('https://analyze-slaz.onrender.com/analyze', { 
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer xai-SqkCtzN0m0QoCG9Lq9lyZGBZiWw2iMxVqYKjYkpQZly0rj72vGDsrbB65yBZJ94aYOnzrUXs9tSZ5Ye5'
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": enhancedSystemPrompt
-                    },
-                    {
-                        "role": "user",
-                        "content": '${query.replace(/'/g, "\\'")}'
-                    }
-                ],
-                "model": "grok-3-latest",
-                "stream": false,
-                "temperature": 0
+                query: '${query.replace(/'/g, "\\'")}',
+                systemPrompt: enhancedSystemPrompt
             })
         });
         
@@ -178,12 +196,23 @@ exports.handler = async (event) => {
         // Store only the description from the result in Supabase
         let description;
         try {
-            // Extract content from Grok response
-            if (data && data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
-                description = data.choices[0].message.content;
+            // Extract specifically the analysis field from the nested structure
+            if (data && typeof data === 'object') {
+                if (data.data && data.data.analysis) {
+                    description = data.data.analysis;
+                } else if (data.result && data.result.description) {
+                    description = data.result.description;
+                } else if (data.description) {
+                    description = data.description;
+                } else if (data.data && typeof data.data === 'string') {
+                    description = data.data;
+                } else if (data.result && typeof data.result === 'string') {
+                    description = data.result;
+                } else {
+                    description = JSON.stringify(data);
+                }
             } else {
-                console.error('Could not extract content from Grok response. Full response:', JSON.stringify(data));
-                description = JSON.stringify(data); // Store full response if content not found
+                description = String(data);
             }
             
             // Ensure description is a string and not too large
