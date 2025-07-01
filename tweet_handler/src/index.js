@@ -116,6 +116,63 @@ async function getTwitterCredentials(agentId) {
 
 // Function to intelligently break long text into tweet-sized chunks
 function breakIntoTweetChunks(text, maxLength = 270) {
+  const originalText = text.trim();
+  
+  // If content is above 200 characters, split into sentence-based tweets
+  if (originalText.length > 200) {
+    console.log(`📝 Content is ${originalText.length} characters, splitting into sentence-based thread`);
+    return breakIntoSentenceBasedTweets(originalText, maxLength);
+  }
+  
+  // For shorter content, use the original chunking logic
+  return breakIntoRegularChunks(originalText, maxLength);
+}
+
+// Function to break content into sentence-based tweets
+function breakIntoSentenceBasedTweets(text, maxLength = 270) {
+  const effectiveMaxLength = maxLength;
+  
+  // Check if this is a reply (starts with @username)
+  const isReply = text.startsWith('@');
+  let mentionPart = '';
+  let contentText = text;
+  
+  if (isReply) {
+    // Extract the mention part to ensure it stays in the first tweet
+    const spaceIndex = text.indexOf(' ');
+    if (spaceIndex !== -1) {
+      mentionPart = text.substring(0, spaceIndex + 1);
+      contentText = text.substring(spaceIndex + 1);
+    }
+  }
+  
+  // Split content into sentences
+  const sentences = contentText.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+  const chunks = [];
+  
+  for (let i = 0; i < sentences.length; i++) {
+    let sentence = sentences[i].trim();
+    
+    // Add mention to first sentence if this is a reply
+    if (i === 0 && isReply) {
+      sentence = mentionPart + sentence;
+    }
+    
+    // If a single sentence is too long, break it down further
+    if (sentence.length > effectiveMaxLength) {
+      const subChunks = breakIntoRegularChunks(sentence, maxLength);
+      chunks.push(...subChunks);
+    } else {
+      chunks.push(sentence);
+    }
+  }
+  
+  console.log(`📝 Created ${chunks.length} sentence-based tweets`);
+  return chunks;
+}
+
+// Function to break content using the original chunking logic
+function breakIntoRegularChunks(text, maxLength = 270) {
   // Reserve space for thread indicators like " (1/3)"
   const effectiveMaxLength = maxLength - 10;
   
@@ -209,15 +266,117 @@ function breakIntoTweetChunks(text, maxLength = 270) {
     remainingText = remainingText.substring(breakPoint).trim();
   }
 
-  // Add thread indicators if multiple chunks
-  if (chunks.length > 1) {
-    for (let i = 0; i < chunks.length; i++) {
-      // Add simple thread indicator
-      chunks[i] += ` (${i + 1}/${chunks.length})`;
+  return chunks;
+}
+
+// Robust function to create Twitter threads with proper ID verification
+async function createThread(scraper, threadContent, options = {}) {
+  const { delayBetweenTweets = 3000, indexingDelay = 10000 } = options;
+  let previousTweetId = null;
+
+  for (let i = 0; i < threadContent.length; i++) {
+    const tweetText = threadContent[i];
+    console.log(`Posting tweet ${i + 1}/${threadContent.length}: "${tweetText.substring(0, 80)}${tweetText.length > 80 ? '...' : ''}"`);
+    
+    const tweetResult = await scraper.sendTweet(
+      tweetText,
+      i === 0 ? null : previousTweetId,
+    );
+
+    try {
+      console.log(`⏳ Waiting ${indexingDelay/1000} seconds for tweet indexing...`);
+      await new Promise((resolve) => setTimeout(resolve, indexingDelay));
+
+      if (tweetResult?.id) {
+        previousTweetId = tweetResult.id;
+        console.log(`✅ Tweet ${i + 1}/${threadContent.length} posted with ID: ${previousTweetId}`);
+      } else {
+        console.log(`🔍 No tweet ID in response, searching recent tweets for verification...`);
+        const username = await scraper
+          .me()
+          .then((profile) => profile?.username);
+        if (!username) {
+          throw new Error('Failed to get username');
+        }
+        const recentTweets = scraper.getTweets(username, 5);
+        for await (const tweet of recentTweets) {
+          if (tweet.text.includes(tweetText.substring(0, 30))) {
+            previousTweetId = tweet.id;
+            console.log(`✅ Tweet ${i + 1}/${threadContent.length} found with ID: ${previousTweetId}`);
+            break;
+          }
+        }
+      }
+
+      if (!previousTweetId) {
+        throw new Error(`Failed to verify tweet #${i + 1}`);
+      }
+
+      if (i < threadContent.length - 1) {
+        console.log(`⏳ Waiting ${delayBetweenTweets/1000} seconds before next tweet...`);
+        await new Promise((resolve) => setTimeout(resolve, delayBetweenTweets));
+      }
+    } catch (error) {
+      throw new Error(`Failed to post tweet #${i + 1}: ${error.message}`);
     }
   }
 
-  return chunks;
+  return previousTweetId;
+}
+
+// Robust function to create reply threads with proper ID verification
+async function createReplyThread(scraper, threadContent, originalTweetId, options = {}) {
+  const { delayBetweenTweets = 3000, indexingDelay = 8000 } = options;
+  let currentReplyToId = originalTweetId;
+
+  for (let i = 0; i < threadContent.length; i++) {
+    const tweetText = threadContent[i];
+    console.log(`📤 Posting reply ${i + 1}/${threadContent.length}: "${tweetText.substring(0, 80)}${tweetText.length > 80 ? '...' : ''}"`);
+    
+    const tweetResult = await scraper.sendTweet(tweetText, currentReplyToId);
+
+    try {
+      console.log(`⏳ Waiting ${indexingDelay/1000} seconds for reply indexing...`);
+      await new Promise((resolve) => setTimeout(resolve, indexingDelay));
+
+      if (tweetResult?.id) {
+        currentReplyToId = tweetResult.id;
+        console.log(`✅ Reply ${i + 1}/${threadContent.length} posted with ID: ${currentReplyToId}`);
+      } else {
+        console.log(`🔍 No reply ID in response, searching recent tweets for verification...`);
+        const username = await scraper
+          .me()
+          .then((profile) => profile?.username);
+        if (!username) {
+          throw new Error('Failed to get username');
+        }
+        const recentTweets = scraper.getTweets(username, 5);
+        for await (const tweet of recentTweets) {
+          if (tweet.text.includes(tweetText.substring(0, 30))) {
+            currentReplyToId = tweet.id;
+            console.log(`✅ Reply ${i + 1}/${threadContent.length} found with ID: ${currentReplyToId}`);
+            break;
+          }
+        }
+      }
+
+      if (!currentReplyToId) {
+        console.log(`⚠️ Failed to verify reply #${i + 1}, using original tweet ID as fallback`);
+        currentReplyToId = originalTweetId;
+      }
+
+      if (i < threadContent.length - 1) {
+        console.log(`⏳ Waiting ${delayBetweenTweets/1000} seconds before next reply...`);
+        await new Promise((resolve) => setTimeout(resolve, delayBetweenTweets));
+      }
+    } catch (error) {
+      console.error(`Warning: Failed to verify reply #${i + 1}: ${error.message}`);
+      // Continue with the original tweet ID as fallback
+      currentReplyToId = originalTweetId;
+    }
+  }
+
+  return currentReplyToId;
 }
 
 // Enhanced function to post tweet or thread using twitter-agent
@@ -270,62 +429,14 @@ async function postTweet(twitterCredentials, tweetContent) {
       const result = await scraper.sendTweet(tweetChunks[0]);
       console.log('✨ Tweet posted successfully!');
     } else {
-      // Thread posting with improved ID extraction
+      // Thread posting with robust ID extraction and verification
       console.log('🧵 Posting thread with', tweetChunks.length, 'tweets');
       
       try {
-        let lastTweetId = null;
-        
-        for (let i = 0; i < tweetChunks.length; i++) {
-          const chunk = tweetChunks[i];
-          console.log(`Posting tweet ${i + 1}/${tweetChunks.length}:`, chunk);
-          
-          let tweetResult;
-          
-          if (i === 0) {
-            // First tweet in thread
-            tweetResult = await scraper.sendTweet(chunk);
-          } else if (lastTweetId) {
-            // Reply to the previous tweet to create thread
-            tweetResult = await scraper.sendTweet(chunk, lastTweetId);
-          } else {
-            // Fallback: post as standalone tweet
-            console.log('⚠️ No previous tweet ID available, posting as standalone tweet');
-            tweetResult = await scraper.sendTweet(chunk);
-          }
-          
-          // Try multiple ways to extract tweet ID
-          let newTweetId = null;
-          if (tweetResult) {
-            // Try different possible response structures
-            newTweetId = tweetResult.id || 
-                        tweetResult.data?.id || 
-                        tweetResult.tweet?.id ||
-                        tweetResult.id_str ||
-                        tweetResult.data?.id_str;
-            
-            // If it's a string that looks like a tweet ID
-            if (typeof tweetResult === 'string' && /^\d+$/.test(tweetResult)) {
-              newTweetId = tweetResult;
-            }
-          }
-          
-          if (newTweetId) {
-            lastTweetId = newTweetId;
-            console.log(`✅ Tweet ${i + 1}/${tweetChunks.length} posted with ID: ${newTweetId}`);
-          } else {
-            console.log(`✅ Tweet ${i + 1}/${tweetChunks.length} posted (ID not available)`);
-            console.log('🔍 Tweet result structure:', typeof tweetResult, tweetResult ? Object.keys(tweetResult) : 'null');
-          }
-          
-          // Add delay between tweets
-          if (i < tweetChunks.length - 1) {
-            const delay = i === 0 ? 5000 : 3000; // Longer delay after first tweet
-            console.log(`⏳ Waiting ${delay/1000} seconds before next tweet...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-          }
-        }
-        
+        await createThread(scraper, tweetChunks, { 
+          delayBetweenTweets: 3000, 
+          indexingDelay: 10000 
+        });
         console.log('🎉 Thread posting completed!');
       } catch (threadError) {
         console.error('❌ Error during thread posting:', threadError);
@@ -651,49 +762,20 @@ async function postReplyOrThread(scraper, replyContent, originalTweetId, delayMs
       await scraper.sendTweet(replyChunks[0], originalTweetId);
       return true;
     } else {
-      // Reply thread
+      // Reply thread using robust createThread approach
       console.log(`🧵 Posting reply thread with ${replyChunks.length} tweets`);
       
-      let currentReplyToId = originalTweetId;
-      
-      for (let i = 0; i < replyChunks.length; i++) {
-        const chunk = replyChunks[i];
-        console.log(`📤 Posting reply ${i + 1}/${replyChunks.length}: "${chunk.substring(0, 80)}${chunk.length > 80 ? '...' : ''}"`);
-        
-        const tweetResult = await scraper.sendTweet(chunk, currentReplyToId);
-        
-        // Try to extract tweet ID for next reply in chain
-        let newTweetId = null;
-        if (tweetResult) {
-          newTweetId = tweetResult.id || 
-                      tweetResult.data?.id || 
-                      tweetResult.tweet?.id ||
-                      tweetResult.id_str ||
-                      tweetResult.data?.id_str;
-          
-          if (typeof tweetResult === 'string' && /^\d+$/.test(tweetResult)) {
-            newTweetId = tweetResult;
-          }
-        }
-        
-        if (newTweetId) {
-          currentReplyToId = newTweetId;
-          console.log(`✅ Reply ${i + 1}/${replyChunks.length} posted with ID: ${newTweetId}`);
-        } else {
-          console.log(`✅ Reply ${i + 1}/${replyChunks.length} posted (ID not extracted, may break thread chain)`);
-          console.log('🔍 Reply result structure:', typeof tweetResult, tweetResult ? Object.keys(tweetResult) : 'null');
-          // Keep using the original tweet ID as fallback
-        }
-        
-        // Add delay between thread replies
-        if (i < replyChunks.length - 1) {
-          console.log(`⏳ Waiting ${delayMs}ms before next reply in thread...`);
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-        }
+      try {
+        await createReplyThread(scraper, replyChunks, originalTweetId, { 
+          delayBetweenTweets: delayMs, 
+          indexingDelay: 8000 
+        });
+        console.log('🎉 Reply thread posting completed!');
+        return true;
+      } catch (threadError) {
+        console.error('❌ Error during reply thread posting:', threadError);
+        return false;
       }
-      
-      console.log('🎉 Reply thread posting completed!');
-      return true;
     }
   } catch (error) {
     console.error('❌ Error posting reply thread:', error);
