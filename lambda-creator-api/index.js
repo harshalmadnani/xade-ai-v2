@@ -161,7 +161,7 @@ exports.handler = async (event) => {
         let agentData;
         try {
             console.log('Step 3: Fetching agent data from database...');
-            const url = `${supabaseUrl}/rest/v1/agents2?id=eq.${userId}&select=prompt,post_configuration,graphic,meme`;
+            const url = `${supabaseUrl}/rest/v1/agents2?id=eq.${userId}&select=prompt,post_configuration,graphic,meme,video`;
             
             const response = await httpsRequest(url, {
                 method: 'GET',
@@ -231,7 +231,7 @@ exports.handler = async (event) => {
                 const interval = postConfig.interval;
                 const query = postConfig.topics;
                 const systemPrompt = agentData.prompt;
-                const { graphic, meme } = agentData;
+                const { graphic, meme, video } = agentData;
                 
                 console.log('Step 8: Starting Lambda function creation...');
                 
@@ -282,7 +282,7 @@ exports.handler = async (event) => {
     // Fetch agent configuration from Supabase
     async function fetchAgentConfig() {
         try {
-            const response = await fetch(supabaseUrl + '/rest/v1/agents2?id=eq.' + agentId + '&select=prompt,post_configuration,graphic,meme', {
+            const response = await fetch(supabaseUrl + '/rest/v1/agents2?id=eq.' + agentId + '&select=prompt,post_configuration,graphic,meme,video', {
                 method: 'GET',
                 headers: {
                     'apikey': supabaseKey,
@@ -317,7 +317,8 @@ exports.handler = async (event) => {
                 topics: postConfig.topics,
                 interval: postConfig.interval,
                 graphic: agent.graphic,
-                meme: agent.meme
+                meme: agent.meme,
+                video: agent.video
             };
         } catch (error) {
             console.error('Error fetching agent config:', error);
@@ -552,12 +553,81 @@ exports.handler = async (event) => {
         }
     }
     
+    // Add function to call Video Generator API
+    async function callVideoAPI(text, videoType) {
+        try {
+            const payload = {
+                text: text,
+                video_name: videoType
+            };
+            
+            console.log('Calling Video API with payload:', JSON.stringify(payload));
+            
+            const response = await fetch('https://video-generator-ynrv.onrender.com/process_video', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error('Video API request failed with status: ' + response.status);
+            }
+            
+            const data = await response.json();
+            console.log('Video API response:', JSON.stringify(data));
+            
+            return data.video_url;
+        } catch (error) {
+            console.error('Error calling Video API:', error);
+            throw error;
+        }
+    }
+    
+    // Function to clean JSON from markdown code blocks
+    function cleanJsonFromMarkdown(text) {
+        if (!text) return text;
+        
+        // Remove markdown code blocks
+        const cleanedText = text
+            .replace(/\`\`\`json\\\\n/g, '')
+            .replace(/\`\`\`json/g, '')
+            .replace(/\`\`\`\\\\n/g, '')
+            .replace(/\`\`\`/g, '')
+            .trim();
+        
+        return cleanedText;
+    }
+
+    // Function to extract a JSON object from a string
+    function extractJsonObject(str) {
+        if (!str) return null;
+        // Find the first '{' and the last '}'
+        const startIndex = str.indexOf('{');
+        const endIndex = str.lastIndexOf('}');
+
+        if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+            return null; // No valid JSON object found
+        }
+
+        const jsonStr = str.substring(startIndex, endIndex + 1);
+
+        try {
+            return JSON.parse(jsonStr);
+        } catch (e) {
+            console.log('Could not parse extracted substring as JSON.', e);
+            return null;
+        }
+    }
+    
     // Simplified function to extract description from API response
     function extractDescription(data) {
         if (!data) return 'No response data';
         
         // Try different common response formats
         const candidates = [
+            data.result?.text, // Added this based on analyze API response format
             data.data?.analysis,
             data.result?.description,
             data.description,
@@ -585,10 +655,12 @@ exports.handler = async (event) => {
         
         const isGraphicMode = config.graphic === true;
         const isMemeAgentMode = config.meme === true;
+        const isVideoMode = config.video === true;
         
         console.log('Agent configuration:', {
             graphic: isGraphicMode,
             meme: isMemeAgentMode,
+            video: isVideoMode,
             topics: config.topics
         });
         
@@ -608,7 +680,9 @@ exports.handler = async (event) => {
         const lastPosts = await getLastTenPosts();
         
         let enhancedSystemPrompt;
-        if (isGraphicMode) {
+        if (isVideoMode) {
+            enhancedSystemPrompt = config.systemPrompt + '\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\n' + lastPosts + '\\n\\nIMPORTANT: You generate brainrot explainer videos. You must return your response in JSON format with the following structure: {"text": "content for video", "video_type": "minecraft OR glass OR subway", "caption": "tweet text here"}. The video_type must be one of: minecraft, glass, or subway. The caption will be posted as tweet text along with the video URL. The "text" field should be a normal paragraph, not a list or thread. CRITICAL: Keep the "text" field under 200 characters for video generation to work properly.';
+        } else if (isGraphicMode) {
             enhancedSystemPrompt = config.systemPrompt + '\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\n' + lastPosts + '\\n\\nIMPORTANT: You must return your response in JSON format with the following structure: {"caption": "your tweet text here", "backgroundColor": "hex color or gradient", "textColor": "hex color", "text": "text to display on image"}. The caption will be posted as tweet text, and the other fields will be used to generate a graphic image.';
         } else {
             enhancedSystemPrompt = config.systemPrompt + '\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\n' + lastPosts;
@@ -635,11 +709,42 @@ exports.handler = async (event) => {
         const data = await response.json();
         console.log('API response received:', JSON.stringify(data));
         
-        // Process the response based on mode (graphic or regular)
-        let description, imageUrl;
+        // Process the response based on mode (video, graphic, or regular)
+        let description, imageUrl, videoUrl;
         
         try {
-            if (isGraphicMode) {
+            if (isVideoMode) {
+                // For video mode, expect JSON response with text, video_type, and caption
+                const videoData = extractDescription(data);
+                
+                // Clean JSON from markdown code blocks
+                const cleanedVideoData = cleanJsonFromMarkdown(videoData);
+                
+                // Try to extract a JSON object from the potentially messy string
+                const parsedVideoData = extractJsonObject(cleanedVideoData);
+                
+                if (parsedVideoData && parsedVideoData.text && parsedVideoData.video_type && parsedVideoData.caption) {
+                    description = parsedVideoData.caption;
+                    
+                    // Extract video properties
+                    const text = parsedVideoData.text;
+                    const videoType = parsedVideoData.video_type;
+                    
+                    console.log('Extracted video data:', { text, videoType });
+                    
+                    // Call video API to generate video
+                    try {
+                        videoUrl = await callVideoAPI(text, videoType);
+                        console.log('Generated video URL:', videoUrl);
+                    } catch (videoError) {
+                        console.error('Failed to generate video:', videoError);
+                        // Continue without video if generation fails
+                    }
+                } else {
+                    console.log('Failed to extract valid video JSON from response. Storing raw response for debugging.');
+                    description = videoData;
+                }
+            } else if (isGraphicMode) {
                 // For graphic mode, expect JSON response with caption, backgroundColor, textColor, text
                 const graphicData = extractDescription(data);
                 
@@ -724,7 +829,13 @@ exports.handler = async (event) => {
         }
         
         // For non-meme agents or if meme generation failed, store the content
-        if (isGraphicMode && imageUrl) {
+        if (isVideoMode && videoUrl) {
+            // For video mode with video, store caption with video URL in tweet_content
+            const videoContent = description + ' ' + videoUrl;
+            const result = await insertToSupabase(videoContent);
+            console.log('Video post with video URL stored successfully');
+            return { success: true, action: 'video_post', videoUrl: videoUrl };
+        } else if (isGraphicMode && imageUrl) {
             // For graphic mode with image, store caption with image URL
             const result = await insertToSupabase(description, false, null, true, imageUrl);
             console.log('Graphic post with image stored successfully');

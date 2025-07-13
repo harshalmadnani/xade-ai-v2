@@ -10,7 +10,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.1",
+    "@supabase/supabase-js": "^2.50.5",
     "aws-sdk": "^2.1692.0",
     "axios": "^1.8.1",
     "dotenv": "^16.4.7",
