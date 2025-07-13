@@ -2,6 +2,10 @@ const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { Scraper, SpaceParticipant, SttTtsPlugin } = require('twitter-agent');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
+const path = require('path');
+const { URL } = require('url');
 require('dotenv').config();
 
 const app = express();
@@ -270,16 +274,23 @@ function breakIntoRegularChunks(text, maxLength = 270) {
 
 // Robust function to create Twitter threads with proper ID verification
 async function createThread(scraper, threadContent, options = {}) {
-  const { delayBetweenTweets = 3000, indexingDelay = 10000 } = options;
+  const { delayBetweenTweets = 3000, indexingDelay = 10000, mediaData } = options;
   let previousTweetId = null;
 
   for (let i = 0; i < threadContent.length; i++) {
     const tweetText = threadContent[i];
     console.log(`Posting tweet ${i + 1}/${threadContent.length}: "${tweetText.substring(0, 80)}${tweetText.length > 80 ? '...' : ''}"`);
     
+    // Only attach media to the first tweet in a thread
+    const mediaForTweet = (i === 0 && mediaData) ? mediaData : undefined;
+    if (mediaForTweet) {
+      console.log(`📎 Attaching ${mediaForTweet.length} media file(s) to first tweet`);
+    }
+    
     const tweetResult = await scraper.sendTweet(
       tweetText,
       i === 0 ? null : previousTweetId,
+      mediaForTweet
     );
 
     try {
@@ -325,14 +336,20 @@ async function createThread(scraper, threadContent, options = {}) {
 
 // Robust function to create reply threads with proper ID verification
 async function createReplyThread(scraper, threadContent, originalTweetId, options = {}) {
-  const { delayBetweenTweets = 3000, indexingDelay = 8000 } = options;
+  const { delayBetweenTweets = 3000, indexingDelay = 8000, mediaData } = options;
   let currentReplyToId = originalTweetId;
 
   for (let i = 0; i < threadContent.length; i++) {
     const tweetText = threadContent[i];
     console.log(`📤 Posting reply ${i + 1}/${threadContent.length}: "${tweetText.substring(0, 80)}${tweetText.length > 80 ? '...' : ''}"`);
     
-    const tweetResult = await scraper.sendTweet(tweetText, currentReplyToId);
+    // Only attach media to the first reply in a thread
+    const mediaForReply = (i === 0 && mediaData) ? mediaData : undefined;
+    if (mediaForReply) {
+      console.log(`📎 Attaching ${mediaForReply.length} media file(s) to first reply`);
+    }
+    
+    const tweetResult = await scraper.sendTweet(tweetText, currentReplyToId, mediaForReply);
 
     try {
       console.log(`⏳ Waiting ${indexingDelay/1000} seconds for reply indexing...`);
@@ -410,11 +427,20 @@ async function postTweet(twitterCredentials, tweetContent) {
       fullContent = fullContent.substring(1, fullContent.length - 1);
     }
     
+    // Process media from Supabase links
+    const { cleanContent, mediaData } = await processMediaFromContent(fullContent);
+    
     // Break content into appropriate chunks
-    const tweetChunks = breakIntoTweetChunks(fullContent);
+    const tweetChunks = breakIntoTweetChunks(cleanContent);
     
     console.log(`\n📝 CONTENT BREAKDOWN:`);
     console.log(`Content will be posted as ${tweetChunks.length} tweet(s)`);
+    if (mediaData.length > 0) {
+      console.log(`📎 Media attachments: ${mediaData.length} file(s)`);
+      mediaData.forEach((media, i) => {
+        console.log(`  Media ${i + 1}: ${media.mediaType} (${media.data.length} bytes)`);
+      });
+    }
     if (tweetChunks.length > 1) {
       tweetChunks.forEach((chunk, i) => {
         console.log(`Chunk ${i + 1}: "${chunk.substring(0, 50)}..."`);
@@ -423,18 +449,19 @@ async function postTweet(twitterCredentials, tweetContent) {
     console.log(`\n🚀 STARTING TWEET POSTING:`);
     
     if (tweetChunks.length === 1) {
-      // Single tweet
+      // Single tweet with potential media
       console.log('Posting single tweet:', tweetChunks[0]);
-      const result = await scraper.sendTweet(tweetChunks[0]);
+      const result = await scraper.sendTweet(tweetChunks[0], null, mediaData.length > 0 ? mediaData : undefined);
       console.log('✨ Tweet posted successfully!');
     } else {
-      // Thread posting with robust ID extraction and verification
+      // Thread posting with media only on first tweet
       console.log('🧵 Posting thread with', tweetChunks.length, 'tweets');
       
       try {
         await createThread(scraper, tweetChunks, { 
           delayBetweenTweets: 3000, 
-          indexingDelay: 10000 
+          indexingDelay: 10000,
+          mediaData: mediaData.length > 0 ? mediaData : undefined
         });
         console.log('🎉 Thread posting completed!');
       } catch (threadError) {
@@ -752,13 +779,19 @@ async function getAIAnalysis(tweet) {
 // Function to post a reply or reply thread
 async function postReplyOrThread(scraper, replyContent, originalTweetId, delayMs = 3000) {
   try {
+    // Process media from Supabase links in reply content
+    const { cleanContent, mediaData } = await processMediaFromContent(replyContent);
+    
     // Break reply into chunks if needed
-    const replyChunks = breakIntoTweetChunks(replyContent);
+    const replyChunks = breakIntoTweetChunks(cleanContent);
     
     if (replyChunks.length === 1) {
-      // Single reply
+      // Single reply with potential media
       console.log(`📤 Posting single reply: "${replyChunks[0]}"`);
-      await scraper.sendTweet(replyChunks[0], originalTweetId);
+      if (mediaData.length > 0) {
+        console.log(`📎 Attaching ${mediaData.length} media file(s) to reply`);
+      }
+      await scraper.sendTweet(replyChunks[0], originalTweetId, mediaData.length > 0 ? mediaData : undefined);
       return true;
     } else {
       // Reply thread using robust createThread approach
@@ -767,7 +800,8 @@ async function postReplyOrThread(scraper, replyContent, originalTweetId, delayMs
       try {
         await createReplyThread(scraper, replyChunks, originalTweetId, { 
           delayBetweenTweets: delayMs, 
-          indexingDelay: 8000 
+          indexingDelay: 8000,
+          mediaData: mediaData.length > 0 ? mediaData : undefined
         });
         console.log('🎉 Reply thread posting completed!');
         return true;
@@ -1287,6 +1321,131 @@ async function setupRealtimeSubscription() {
       }
     )
     .subscribe();
+}
+
+// Helper function to detect Supabase links in tweet content
+function detectSupabaseLinks(content) {
+  const supabaseUrlPattern = /https?:\/\/[a-zA-Z0-9-]+\.supabase\.co\/storage\/v1\/object\/[^\s]+/g;
+  return content.match(supabaseUrlPattern) || [];
+}
+
+// Helper function to download media from URL
+async function downloadMedia(url) {
+  return new Promise((resolve, reject) => {
+    const protocol = url.startsWith('https:') ? https : http;
+    
+    protocol.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download media: ${response.statusCode}`));
+        return;
+      }
+      
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        resolve(buffer);
+      });
+      response.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+// Helper function to determine MIME type from URL or content
+function getMimeType(url, buffer) {
+  // First try to determine from URL extension
+  const urlPath = new URL(url).pathname.toLowerCase();
+  const extension = path.extname(urlPath);
+  
+  const mimeTypes = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.mp4': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.avi': 'video/x-msvideo',
+    '.webm': 'video/webm'
+  };
+  
+  if (mimeTypes[extension]) {
+    return mimeTypes[extension];
+  }
+  
+  // Fallback: check buffer magic numbers
+  if (buffer) {
+    const header = buffer.toString('hex', 0, 4);
+    if (header.startsWith('ffd8')) return 'image/jpeg';
+    if (header.startsWith('8950')) return 'image/png';
+    if (header.startsWith('4749')) return 'image/gif';
+    if (header.startsWith('0000')) return 'video/mp4';
+  }
+  
+  // Default fallback
+  return 'application/octet-stream';
+}
+
+// Helper function to process media from Supabase links
+async function processMediaFromContent(content) {
+  const supabaseLinks = detectSupabaseLinks(content);
+  
+  if (supabaseLinks.length === 0) {
+    return { cleanContent: content, mediaData: [] };
+  }
+  
+  console.log(`📎 Found ${supabaseLinks.length} Supabase media link(s)`);
+  
+  const mediaData = [];
+  let cleanContent = content;
+  
+  for (const link of supabaseLinks) {
+    try {
+      console.log(`📥 Downloading media from: ${link}`);
+      const buffer = await downloadMedia(link);
+      const mimeType = getMimeType(link, buffer);
+      
+      console.log(`✅ Downloaded ${buffer.length} bytes, MIME type: ${mimeType}`);
+      
+      // Check file size limits
+      const maxVideoSize = 512 * 1024 * 1024; // 512MB
+      const maxImageSize = 5 * 1024 * 1024; // 5MB reasonable limit for images
+      
+      if (mimeType.startsWith('video/') && buffer.length > maxVideoSize) {
+        console.log(`⚠️ Video file too large: ${buffer.length} bytes (max: ${maxVideoSize})`);
+        continue;
+      }
+      
+      if (mimeType.startsWith('image/') && buffer.length > maxImageSize) {
+        console.log(`⚠️ Image file too large: ${buffer.length} bytes (max: ${maxImageSize})`);
+        continue;
+      }
+      
+      mediaData.push({
+        data: buffer,
+        mediaType: mimeType
+      });
+      
+      // Remove the Supabase link from the content
+      cleanContent = cleanContent.replace(link, '').trim();
+      
+      // Twitter limits: max 4 images OR 1 video
+      if (mimeType.startsWith('video/') || mediaData.length >= 4) {
+        break;
+      }
+      
+    } catch (error) {
+      console.error(`❌ Failed to download media from ${link}:`, error.message);
+      continue;
+    }
+  }
+  
+  // Clean up any extra whitespace
+  cleanContent = cleanContent.replace(/\s+/g, ' ').trim();
+  
+  console.log(`📝 Processed ${mediaData.length} media file(s)`);
+  console.log(`📄 Clean content: "${cleanContent}"`);
+  
+  return { cleanContent, mediaData };
 }
 
 // Helper function to set up the scraper with cookies or login
