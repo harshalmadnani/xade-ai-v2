@@ -702,7 +702,7 @@ async function getAIAnalysis(tweet) {
     const { fullContent, contextInfo } = extractTweetContent(tweet);
     
     // Create enhanced system prompt based on context
-    let systemPrompt = "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response under 200 characters no hashtags.";
+    let systemPrompt = "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response under 200 characters no hashtags and do not mention any errors or warnings whatsoever.";
     
     if (contextInfo.hasQuotedTweet) {
       systemPrompt += ` The tweet is a QUOTE TWEET that includes content from @${contextInfo.quotedAuthor}. The user is sharing someone else's tweet with their own commentary. Consider BOTH the user's commentary AND the quoted content when crafting your response. You can:
@@ -714,7 +714,7 @@ async function getAIAnalysis(tweet) {
     }
     
     if (contextInfo.isReply) {
-      systemPrompt += " This appears to be part of a conversation thread. Keep your response conversational and contextually appropriate to continue the discussion.";
+      systemPrompt += " This appears to be part of a conversation thread. Keep your response conversational and contextually appropriate to continue the discussion and no errors or warnings whatsoever.";
     }
     
     if (contextInfo.tweetType === 'retweet') {
