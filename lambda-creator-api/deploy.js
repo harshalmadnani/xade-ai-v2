@@ -122,7 +122,7 @@ async function deploy() {
                             SUPER_MEME_API_TOKEN: process.env.SUPER_MEME_API_TOKEN || 'q2hdfDvhsm+QWr2mtjEgAb5xfe8='
                         }
                     },
-                    Timeout: 60
+                    Timeout: 300
                 }).promise();
                 
             } catch (error) {
@@ -153,7 +153,7 @@ async function deploy() {
                             ZipFile: zipFile
                         },
                         Description: 'API to create analysis Lambda functions',
-                        Timeout: 60,
+                        Timeout: 300,
                         Environment: {
                             Variables: {
                                 SUPABASE_URL: process.env.SUPABASE_URL,
@@ -202,58 +202,75 @@ async function deploy() {
                 const resources = await apigateway.getResources({ restApiId: apiId }).promise();
                 const rootResourceId = resources.items.find(item => item.path === '/').id;
                 
-                // Create resource if it doesn't exist
-                let resourceId;
-                const existingResource = resources.items.find(item => item.path === '/create');
+                // Create /create resource if it doesn't exist
+                let createResourceId;
+                const existingCreateResource = resources.items.find(item => item.path === '/create');
                 
-                if (existingResource) {
-                    resourceId = existingResource.id;
-                    console.log(`Using existing resource: ${resourceId}`);
+                if (existingCreateResource) {
+                    createResourceId = existingCreateResource.id;
+                    console.log(`Using existing /create resource: ${createResourceId}`);
                 } else {
-                    // Create new resource
+                    // Create new /create resource
                     const newResource = await apigateway.createResource({
                         restApiId: apiId,
                         parentId: rootResourceId,
                         pathPart: 'create'
                     }).promise();
                     
-                    resourceId = newResource.id;
-                    console.log(`Created new resource: ${resourceId}`);
+                    createResourceId = newResource.id;
+                    console.log(`Created new /create resource: ${createResourceId}`);
                 }
                 
-                // Set up POST method
-                try {
-                    await apigateway.getMethod({
+                // Create /agent resource if it doesn't exist
+                let agentResourceId;
+                const existingAgentResource = resources.items.find(item => item.path === '/agent');
+                
+                if (existingAgentResource) {
+                    agentResourceId = existingAgentResource.id;
+                    console.log(`Using existing /agent resource: ${agentResourceId}`);
+                } else {
+                    // Create new /agent resource
+                    const newAgentResource = await apigateway.createResource({
                         restApiId: apiId,
-                        resourceId: resourceId,
-                        httpMethod: 'POST'
+                        parentId: rootResourceId,
+                        pathPart: 'agent'
                     }).promise();
                     
-                    console.log('POST method already exists, updating...');
-                    
-                    // Update integration
-                    await apigateway.putIntegration({
+                    agentResourceId = newAgentResource.id;
+                    console.log(`Created new /agent resource: ${agentResourceId}`);
+                }
+                
+                // Create /agent/{agentId} resource if it doesn't exist
+                let agentIdResourceId;
+                const existingAgentIdResource = resources.items.find(item => item.path === '/agent/{agentId}');
+                
+                if (existingAgentIdResource) {
+                    agentIdResourceId = existingAgentIdResource.id;
+                    console.log(`Using existing /agent/{agentId} resource: ${agentIdResourceId}`);
+                } else {
+                    // Create new /agent/{agentId} resource
+                    const newAgentIdResource = await apigateway.createResource({
                         restApiId: apiId,
-                        resourceId: resourceId,
-                        httpMethod: 'POST',
-                        type: 'AWS_PROXY',
-                        integrationHttpMethod: 'POST',
-                        uri: `arn:aws:apigateway:${process.env.AWS_REGION}:lambda:path/2015-03-31/functions/${functionArn}/invocations`
+                        parentId: agentResourceId,
+                        pathPart: '{agentId}'
                     }).promise();
                     
-                } catch (error) {
-                    if (error.code === 'NotFoundException') {
-                        // Create method
-                        await apigateway.putMethod({
+                    agentIdResourceId = newAgentIdResource.id;
+                    console.log(`Created new /agent/{agentId} resource: ${agentIdResourceId}`);
+                }
+                
+                // Helper function to setup POST method for a resource
+                async function setupPostMethod(resourceId, resourceName) {
+                    try {
+                        await apigateway.getMethod({
                             restApiId: apiId,
                             resourceId: resourceId,
-                            httpMethod: 'POST',
-                            authorizationType: 'NONE'
+                            httpMethod: 'POST'
                         }).promise();
                         
-                        console.log('Created POST method');
+                        console.log(`POST method already exists for ${resourceName}, updating...`);
                         
-                        // Create integration
+                        // Update integration
                         await apigateway.putIntegration({
                             restApiId: apiId,
                             resourceId: resourceId,
@@ -263,28 +280,114 @@ async function deploy() {
                             uri: `arn:aws:apigateway:${process.env.AWS_REGION}:lambda:path/2015-03-31/functions/${functionArn}/invocations`
                         }).promise();
                         
-                        console.log('Created integration');
-                    } else {
-                        throw error;
+                    } catch (error) {
+                        if (error.code === 'NotFoundException') {
+                            // Create method
+                            await apigateway.putMethod({
+                                restApiId: apiId,
+                                resourceId: resourceId,
+                                httpMethod: 'POST',
+                                authorizationType: 'NONE'
+                            }).promise();
+                            
+                            console.log(`Created POST method for ${resourceName}`);
+                            
+                            // Create integration
+                            await apigateway.putIntegration({
+                                restApiId: apiId,
+                                resourceId: resourceId,
+                                httpMethod: 'POST',
+                                type: 'AWS_PROXY',
+                                integrationHttpMethod: 'POST',
+                                uri: `arn:aws:apigateway:${process.env.AWS_REGION}:lambda:path/2015-03-31/functions/${functionArn}/invocations`
+                            }).promise();
+                            
+                            console.log(`Created integration for ${resourceName}`);
+                        } else {
+                            throw error;
+                        }
                     }
                 }
                 
-                // Add permission for API Gateway to invoke Lambda
-                try {
-                    await lambda.addPermission({
-                        FunctionName: functionName,
-                        StatementId: `apigateway-invoke-${Date.now()}`,
-                        Action: 'lambda:InvokeFunction',
-                        Principal: 'apigateway.amazonaws.com',
-                        SourceArn: `arn:aws:execute-api:${process.env.AWS_REGION}:${process.env.AWS_ACCOUNT_ID}:${apiId}/*/*/create`
-                    }).promise();
-                    
-                    console.log('Added permission for API Gateway to invoke Lambda');
-                } catch (error) {
-                    if (error.code !== 'ResourceConflictException') {
-                        throw error;
+                // Helper function to setup OPTIONS method for CORS
+                async function setupOptionsMethod(resourceId, resourceName) {
+                    try {
+                        await apigateway.getMethod({
+                            restApiId: apiId,
+                            resourceId: resourceId,
+                            httpMethod: 'OPTIONS'
+                        }).promise();
+                        
+                        console.log(`OPTIONS method already exists for ${resourceName}`);
+                        
+                    } catch (error) {
+                        if (error.code === 'NotFoundException') {
+                            // Create OPTIONS method
+                            await apigateway.putMethod({
+                                restApiId: apiId,
+                                resourceId: resourceId,
+                                httpMethod: 'OPTIONS',
+                                authorizationType: 'NONE'
+                            }).promise();
+                            
+                            console.log(`Created OPTIONS method for ${resourceName}`);
+                            
+                            // Create integration for OPTIONS
+                            await apigateway.putIntegration({
+                                restApiId: apiId,
+                                resourceId: resourceId,
+                                httpMethod: 'OPTIONS',
+                                type: 'AWS_PROXY',
+                                integrationHttpMethod: 'POST',
+                                uri: `arn:aws:apigateway:${process.env.AWS_REGION}:lambda:path/2015-03-31/functions/${functionArn}/invocations`
+                            }).promise();
+                            
+                            console.log(`Created OPTIONS integration for ${resourceName}`);
+                        } else {
+                            throw error;
+                        }
                     }
-                    console.log('Permission already exists');
+                }
+                
+                // Set up POST method for /create endpoint
+                await setupPostMethod(createResourceId, '/create');
+                await setupOptionsMethod(createResourceId, '/create');
+                
+                // Set up POST method for /agent/{agentId} endpoint
+                await setupPostMethod(agentIdResourceId, '/agent/{agentId}');
+                await setupOptionsMethod(agentIdResourceId, '/agent/{agentId}');
+                
+                // Add permissions for API Gateway to invoke Lambda
+                const permissions = [
+                    {
+                        statementId: `apigateway-invoke-create-${Date.now()}`,
+                        sourceArn: `arn:aws:execute-api:${process.env.AWS_REGION}:${process.env.AWS_ACCOUNT_ID}:${apiId}/*/*/create`,
+                        description: '/create endpoint'
+                    },
+                    {
+                        statementId: `apigateway-invoke-agent-${Date.now()}`,
+                        sourceArn: `arn:aws:execute-api:${process.env.AWS_REGION}:${process.env.AWS_ACCOUNT_ID}:${apiId}/*/*/agent/*`,
+                        description: '/agent/{agentId} endpoint'
+                    }
+                ];
+                
+                for (const permission of permissions) {
+                    try {
+                        await lambda.addPermission({
+                            FunctionName: functionName,
+                            StatementId: permission.statementId,
+                            Action: 'lambda:InvokeFunction',
+                            Principal: 'apigateway.amazonaws.com',
+                            SourceArn: permission.sourceArn
+                        }).promise();
+                        
+                        console.log(`Added permission for API Gateway to invoke Lambda - ${permission.description}`);
+                    } catch (error) {
+                        if (error.code !== 'ResourceConflictException') {
+                            throw error;
+                        }
+                        console.log(`Permission already exists for ${permission.description}`);
+                    }
                 }
                 
                 // Deploy API
@@ -295,8 +398,10 @@ async function deploy() {
                 
                 console.log(`Deployed API to stage: prod`);
                 
-                const apiUrl = `https://${apiId}.execute-api.${process.env.AWS_REGION}.amazonaws.com/prod/create`;
-                console.log(`API URL: ${apiUrl}`);
+                const baseUrl = `https://${apiId}.execute-api.${process.env.AWS_REGION}.amazonaws.com/prod`;
+                console.log(`API Base URL: ${baseUrl}`);
+                console.log(`Create Endpoint: ${baseUrl}/create`);
+                console.log(`Agent Proxy Endpoint: ${baseUrl}/agent/{agentId}`);
                 
             } catch (error) {
                 if (error.code === 'AccessDeniedException') {

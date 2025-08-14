@@ -4,7 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
-// Initialize AWS services
+// Initialize AWS services with region configuration
+AWS.config.update({
+    region: process.env.AWS_REGION || 'us-east-1'
+});
+
 const lambda = new AWS.Lambda();
 const iam = new AWS.IAM();
 const eventbridge = new AWS.EventBridge();
@@ -120,22 +124,241 @@ function createZipBuffer(filename, content) {
     return Buffer.concat([fileHeader, fileContent, centralDir, endRecord]);
 }
 
+// Function to call Lambda Function URL with AWS_IAM signed request
+async function callLambdaFunctionUrl(functionUrl, payload) {
+    const url = new URL(functionUrl);
+    
+    // Create AWS request
+    const endpoint = new AWS.Endpoint(functionUrl);
+    const request = new AWS.HttpRequest(endpoint, AWS.config.region);
+    
+    request.method = 'POST';
+    request.headers['Content-Type'] = 'application/json';
+    request.headers['Host'] = url.hostname;
+    request.body = JSON.stringify(payload);
+    
+    // Sign the request with AWS credentials
+    const signer = new AWS.Signers.V4(request, 'lambda');
+    signer.addAuthorization(AWS.config.credentials, new Date());
+    
+    // Make the HTTPS request
+    return new Promise((resolve, reject) => {
+        const req = https.request({
+            hostname: url.hostname,
+            port: 443,
+            path: url.pathname,
+            method: request.method,
+            headers: request.headers
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const result = {
+                        statusCode: res.statusCode,
+                        body: JSON.parse(data)
+                    };
+                    resolve(result);
+                } catch (parseError) {
+                    resolve({
+                        statusCode: res.statusCode,
+                        body: data
+                    });
+                }
+            });
+        });
+        
+        req.on('error', (error) => {
+            reject(new Error(`Request failed: ${error.message}`));
+        });
+        
+        req.write(request.body);
+        req.end();
+    });
+}
+
+// Function to get Function URL for an agent from Supabase
+async function getFunctionUrlForAgent(agentId) {
+    try {
+        // Query Supabase to get agent_trigger (which contains the function URL) for this agent
+        const url = `${supabaseUrl}/rest/v1/agents2?id=eq.${agentId}&select=agent_trigger`;
+        
+        const response = await httpsRequest(url, {
+            method: 'GET',
+            headers: {
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (response.status >= 200 && response.status < 300 && response.data.length > 0) {
+            return response.data[0].agent_trigger;
+        }
+        
+        return null;
+    } catch (error) {
+        console.error('Error fetching function URL for agent:', error);
+        return null;
+    }
+}
+
 exports.handler = async (event) => {
     console.log('Starting Lambda creator API');
+    console.log('Event:', JSON.stringify(event, null, 2));
     
     try {
-        // Parse request body
-        const body = JSON.parse(event.body || '{}');
-        const { userId } = body;
+        // Parse the request path to determine which endpoint was called
+        const path = event.path || event.requestContext?.path || '/create';
+        const httpMethod = event.httpMethod || event.requestContext?.httpMethod || 'POST';
+        
+        console.log('Request path:', path, 'Method:', httpMethod);
+        
+        // CORS headers for all responses
+        const corsHeaders = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+            'Access-Control-Allow-Methods': 'OPTIONS, POST, GET',
+            'Access-Control-Max-Age': '86400'
+        };
+        
+        // Handle CORS preflight requests
+        if (httpMethod === 'OPTIONS') {
+            return {
+                statusCode: 200,
+                headers: corsHeaders,
+                body: ''
+            };
+        }
+        
+        // Handle proxy endpoint for calling agents
+        if (path.startsWith('/agent/') && httpMethod === 'POST') {
+            const agentId = path.split('/')[2]; // Extract agentId from /agent/{agentId}
+            
+            if (!agentId) {
+                return {
+                    statusCode: 400,
+                    headers: corsHeaders,
+                    body: JSON.stringify({ error: 'Missing agentId in path' })
+                };
+            }
+            
+            let body;
+            try {
+                body = JSON.parse(event.body || '{}');
+                console.log(`📞 Calling agent ${agentId} with payload:`, body);
+            } catch (parseError) {
+                console.error('Failed to parse request body for agent call:', parseError.message);
+                console.error('Raw event.body:', event.body);
+                return {
+                    statusCode: 400,
+                    headers: corsHeaders,
+                    body: JSON.stringify({ 
+                        error: 'Invalid JSON in request body',
+                        details: parseError.message 
+                    })
+                };
+            }
+            
+            // Get Function URL for this agent
+            const functionUrl = await getFunctionUrlForAgent(agentId);
+            
+            if (!functionUrl) {
+                return {
+                    statusCode: 404,
+                    headers: corsHeaders,
+                    body: JSON.stringify({ 
+                        error: 'Agent not found or no function URL configured',
+                        agent_id: agentId
+                    })
+                };
+            }
+            
+            try {
+                // Add metadata to payload
+                const enrichedPayload = {
+                    ...body,
+                    metadata: {
+                        timestamp: new Date().toISOString(),
+                        source: 'lambda-proxy',
+                        agent_id: agentId
+                    }
+                };
+                
+                // Call the Lambda Function URL
+                const result = await callLambdaFunctionUrl(functionUrl, enrichedPayload);
+                
+                console.log(`✅ Agent ${agentId} responded with status ${result.statusCode}`);
+                
+                // Return the response
+                if (result.statusCode === 200) {
+                    return {
+                        statusCode: 200,
+                        headers: corsHeaders,
+                        body: JSON.stringify({
+                            success: true,
+                            agent_id: agentId,
+                            data: result.body,
+                            metadata: {
+                                response_time: new Date().toISOString(),
+                                function_url: functionUrl
+                            }
+                        })
+                    };
+                } else {
+                    return {
+                        statusCode: result.statusCode,
+                        headers: corsHeaders,
+                        body: JSON.stringify({
+                            success: false,
+                            agent_id: agentId,
+                            error: result.body,
+                            status_code: result.statusCode
+                        })
+                    };
+                }
+                
+            } catch (error) {
+                console.error(`❌ Error calling agent ${agentId}:`, error);
+                
+                return {
+                    statusCode: 500,
+                    headers: corsHeaders,
+                    body: JSON.stringify({
+                        success: false,
+                        error: 'Internal server error',
+                        message: error.message,
+                        agent_id: agentId
+                    })
+                };
+            }
+        }
+        
+        // Handle the original /create endpoint
+        if (path === '/create' || path === '/' || !path.startsWith('/agent/')) {
+            // Parse request body
+            let body;
+            try {
+                body = JSON.parse(event.body || '{}');
+                console.log('📋 Create endpoint request body:', body);
+            } catch (parseError) {
+                console.error('Failed to parse request body for create:', parseError.message);
+                console.error('Raw event.body:', event.body);
+                return {
+                    statusCode: 400,
+                    headers: corsHeaders,
+                    body: JSON.stringify({ 
+                        error: 'Invalid JSON in request body',
+                        details: parseError.message 
+                    })
+                };
+            }
+            const { userId } = body;
         
         if (!userId) {
             return {
                 statusCode: 400,
-                headers: {
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Headers': 'Content-Type',
-                    'Access-Control-Allow-Methods': 'OPTIONS,POST'
-                },
+                headers: corsHeaders,
                 body: JSON.stringify({ message: 'Missing required parameter: userId' })
             };
         }
@@ -146,16 +369,51 @@ exports.handler = async (event) => {
         if (!supabaseUrl || !supabaseKey) {
             return {
                 statusCode: 500,
-                headers: {
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Headers': 'Content-Type',
-                    'Access-Control-Allow-Methods': 'OPTIONS,POST'
-                },
+                headers: corsHeaders,
                 body: JSON.stringify({ message: 'Missing Supabase configuration' })
             };
         }
         
         console.log('Step 2: Environment variables validated');
+        
+        // Check if agent already exists
+        console.log('Step 2.5: Checking if agent already exists...');
+        try {
+            const checkUrl = `${supabaseUrl}/rest/v1/agents2?id=eq.${userId}&select=id,agent_trigger`;
+            
+            const checkResponse = await httpsRequest(checkUrl, {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (checkResponse.status >= 200 && checkResponse.status < 300 && checkResponse.data.length > 0) {
+                const existingAgent = checkResponse.data[0];
+                if (existingAgent.agent_trigger) {
+                    // Agent already exists and has a Function URL
+                    return {
+                        statusCode: 409,
+                        headers: corsHeaders,
+                        body: JSON.stringify({ 
+                            message: 'Agent already exists with Function URL',
+                            agent_id: userId,
+                            existing_function_url: existingAgent.agent_trigger,
+                            action: 'use_existing'
+                        })
+                    };
+                } else {
+                    console.log('Step 2.6: Agent exists but no Function URL, will create Function URL...');
+                }
+            } else {
+                console.log('Step 2.6: Agent not found, will create new agent...');
+            }
+        } catch (checkError) {
+            console.error('Step 2.5 ERROR: Failed to check existing agent:', checkError.message);
+            // Continue with creation if check fails
+        }
         
         // Fetch agent data from agents2 table
         let agentData;
@@ -258,7 +516,7 @@ exports.handler = async (event) => {
                 console.log('Step 9: Role validation completed');
                 
                 // Create unique function name
-                const functionName = `analysis-function-${userId}-${Date.now()}`;
+                const functionName = `analysis-function-${userId}`;
                 console.log('Step 10: Function name generated:', functionName);
                 
                 // Create the Lambda function code
@@ -589,12 +847,15 @@ exports.handler = async (event) => {
     function cleanJsonFromMarkdown(text) {
         if (!text) return text;
         
-        // Remove markdown code blocks
+        // Remove markdown code blocks - handle both escaped and actual newlines
         const cleanedText = text
             .replace(/\`\`\`json\\\\n/g, '')
+            .replace(/\`\`\`json\\n/g, '')
             .replace(/\`\`\`json/g, '')
             .replace(/\`\`\`\\\\n/g, '')
+            .replace(/\`\`\`\\n/g, '')
             .replace(/\`\`\`/g, '')
+            .replace(/\\\\n/g, '\\n')  // Convert escaped newlines to actual newlines
             .trim();
         
         return cleanedText;
@@ -681,11 +942,11 @@ exports.handler = async (event) => {
         
         let enhancedSystemPrompt;
         if (isVideoMode) {
-            enhancedSystemPrompt = config.systemPrompt + '\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\n' + lastPosts + '\\n\\nIMPORTANT: You generate brainrot explainer videos. You must return your response in JSON format with the following structure: {"text": "content for video", "video_type": "minecraft OR glass OR subway", "caption": "tweet text here"}. The video_type must be one of: minecraft, glass, or subway. The caption will be posted as tweet text along with the video URL. The "text" field should be a normal paragraph, not a list or thread. CRITICAL: Keep the "text" field under 200 characters for video generation to work properly.';
+            enhancedSystemPrompt = config.systemPrompt + '\\\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\\\n' + lastPosts + '\\\\n\\\\nIMPORTANT: You generate brainrot explainer videos. You must return your response in JSON format with the following structure: {"text": "content for video", "video_type": "minecraft OR glass OR subway", "caption": "tweet text here"}. The video_type must be one of: minecraft, glass, or subway. The caption will be posted as tweet text along with the video URL. The "text" field should be a normal paragraph, not a list or thread. CRITICAL: Keep the "text" field under 200 characters for video generation to work properly.';
         } else if (isGraphicMode) {
-            enhancedSystemPrompt = config.systemPrompt + '\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\n' + lastPosts + '\\n\\nIMPORTANT: You must return your response in JSON format with the following structure: {"caption": "your tweet text here", "backgroundColor": "hex color or gradient", "textColor": "hex color", "text": "text to display on image"}. The caption will be posted as tweet text, and the other fields will be used to generate a graphic image.';
+            enhancedSystemPrompt = config.systemPrompt + '\\\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\\\n' + lastPosts + '\\\\n\\\\nIMPORTANT: You must return your response in JSON format with the following structure: {"caption": "your tweet text here", "backgroundColor": "hex color or gradient", "textColor": "hex color", "text": "text to display on image"}. The caption will be posted as tweet text, and the other fields will be used to generate a graphic image.';
         } else {
-            enhancedSystemPrompt = config.systemPrompt + '\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\n' + lastPosts;
+            enhancedSystemPrompt = config.systemPrompt + '\\\\n If there is an error in data, dont mention the error in your post and instead just tweet about something relevant to your character prompt. Dont repeat the content of your last 10 posts. Your last 10 posts are:\\\\n' + lastPosts;
         }
         
         console.log('Calling analysis API with query:', 'Make a tweet about ' + config.topics);
@@ -748,13 +1009,20 @@ exports.handler = async (event) => {
                 // For graphic mode, expect JSON response with caption, backgroundColor, textColor, text
                 const graphicData = extractDescription(data);
                 
-                // Try to parse as JSON for graphic mode
-                let parsedGraphicData;
-                try {
-                    parsedGraphicData = JSON.parse(graphicData);
-                } catch (parseError) {
-                    console.log('Failed to parse as JSON, treating as regular text:', parseError);
-                    description = graphicData;
+                // Clean JSON from markdown code blocks
+                const cleanedGraphicData = cleanJsonFromMarkdown(graphicData);
+                
+                // Try to extract a JSON object from the potentially messy string
+                let parsedGraphicData = extractJsonObject(cleanedGraphicData);
+                
+                if (!parsedGraphicData) {
+                    // Fallback: try direct JSON parse if extractJsonObject fails
+                    try {
+                        parsedGraphicData = JSON.parse(cleanedGraphicData);
+                    } catch (parseError) {
+                        console.log('Failed to parse as JSON, treating as regular text:', parseError);
+                        description = graphicData;
+                    }
                 }
                 
                 if (parsedGraphicData && parsedGraphicData.caption) {
@@ -870,7 +1138,7 @@ exports.handler = async (event) => {
                         Role: roleArn,
                         Runtime: 'nodejs18.x',
                         Description: `Analysis function for user ${userId}`,
-                        Timeout: 60,
+                        Timeout: 300,
                         Environment: {
                             Variables: {
                                 SUPABASE_URL: supabaseUrl,
@@ -881,8 +1149,154 @@ exports.handler = async (event) => {
                     };
                     
                     console.log('Step 14: Calling Lambda createFunction...');
-                    await lambda.createFunction(createParams).promise();
-                    console.log('Step 15: Lambda function created successfully!');
+                    
+                    let functionExists = false;
+                    try {
+                        await lambda.createFunction(createParams).promise();
+                        console.log('Step 15: Lambda function created successfully!');
+                    } catch (createError) {
+                        if (createError.code === 'ResourceConflictException' && createError.message.includes('Function already exist')) {
+                            console.log('Step 15: Lambda function already exists, continuing with Function URL creation...');
+                            functionExists = true;
+                        } else {
+                            // Re-throw other errors
+                            throw createError;
+                        }
+                    }
+                    
+                    // Create Function URL for HTTP(S) endpoint access
+                    console.log('Step 16: Creating Function URL...');
+                    let functionUrl = null;
+                    let functionUrlError = null;
+                    
+                    try {
+                        // Wait a moment for the function to be fully ready
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        
+                        // First, try to check if function URL already exists
+                        try {
+                            const existingUrlResponse = await lambda.getFunctionUrlConfig({ FunctionName: functionName }).promise();
+                            if (existingUrlResponse && existingUrlResponse.FunctionUrl) {
+                                functionUrl = existingUrlResponse.FunctionUrl;
+                                console.log('Step 16.5: Function URL already exists:', functionUrl);
+                                console.log('Step 16.5.1: Auth type:', existingUrlResponse.AuthType);
+                                
+                                // Update existing Function URL to AWS_IAM if it's currently NONE
+                                if (existingUrlResponse.AuthType === 'NONE') {
+                                    console.log('Step 16.5.2: Updating existing Function URL to AWS_IAM authentication...');
+                                    try {
+                                        const updateResponse = await lambda.updateFunctionUrlConfig({
+                                            FunctionName: functionName,
+                                            AuthType: 'AWS_IAM',
+                                            Cors: {
+                                                AllowOrigins: ['*'],
+                                                AllowMethods: ['*'],
+                                                AllowHeaders: ['*'],
+                                                MaxAge: 86400
+                                            }
+                                        }).promise();
+                                        console.log('Step 16.5.3: Function URL updated to AWS_IAM authentication');
+                                        functionUrl = updateResponse.FunctionUrl;
+                                    } catch (updateError) {
+                                        console.error('Step ERROR: Failed to update Function URL auth type:', updateError.message);
+                                    }
+                                }
+                            }
+                        } catch (getUrlError) {
+                            // Function URL doesn't exist, which is expected
+                            console.log('Step 16.6: No existing function URL found, creating new one');
+                        }
+                        
+                        // Only create if we don't already have one
+                        if (!functionUrl) {
+                            const functionUrlParams = {
+                                FunctionName: functionName,
+                                AuthType: 'AWS_IAM', // Use IAM authentication
+                                Cors: {
+                                    AllowOrigins: ['*'],
+                                    AllowMethods: ['*'],
+                                    AllowHeaders: ['*'],
+                                    MaxAge: 86400
+                                }
+                            };
+                            
+                            console.log('Step 16.1: Function URL params:', JSON.stringify(functionUrlParams, null, 2));
+                            
+                            const functionUrlResponse = await lambda.createFunctionUrlConfig(functionUrlParams).promise();
+                            
+                            console.log('Step 16.2: Function URL response:', JSON.stringify(functionUrlResponse, null, 2));
+                            
+                            if (functionUrlResponse && functionUrlResponse.FunctionUrl) {
+                                functionUrl = functionUrlResponse.FunctionUrl;
+                                console.log('Step 17: Function URL created successfully with AWS_IAM authentication:', functionUrl);
+                            } else {
+                                console.error('Step ERROR: Function URL response does not contain FunctionUrl property');
+                                functionUrlError = 'Function URL creation returned invalid response';
+                            }
+                        }
+                        
+                    } catch (urlError) {
+                        console.error('Step ERROR: Function URL creation failed:', {
+                            message: urlError.message,
+                            code: urlError.code,
+                            statusCode: urlError.statusCode,
+                            stack: urlError.stack
+                        });
+                        functionUrlError = `${urlError.code || 'UnknownError'}: ${urlError.message}`;
+                        
+                        // Try alternative approach - add resource-based policy for function invocation
+                        try {
+                            console.log('Step 16.3: Attempting to add resource-based policy for public access...');
+                            await lambda.addPermission({
+                                FunctionName: functionName,
+                                StatementId: 'FunctionURLAllowPublicAccess',
+                                Action: 'lambda:InvokeFunctionUrl',
+                                Principal: '*'
+                            }).promise();
+                            console.log('Step 16.4: Resource-based policy added successfully');
+                        } catch (permissionError) {
+                            console.error('Step ERROR: Could not add resource-based policy:', permissionError.message);
+                        }
+                    }
+                    
+                    // Additional debugging - log final values
+                    console.log('Step 18: Final function URL status:', {
+                        functionUrl: functionUrl,
+                        functionUrlError: functionUrlError,
+                        hasUrl: !!functionUrl,
+                        hasError: !!functionUrlError
+                    });
+                    
+                    // Update agent in database with function URL
+                    if (functionUrl) {
+                        try {
+                            console.log('Step 19: Updating agent with function URL...');
+                            const updateUrl = `${supabaseUrl}/rest/v1/agents2?id=eq.${userId}`;
+                            
+                            const updateResponse = await httpsRequest(updateUrl, {
+                                method: 'PATCH',
+                                headers: {
+                                    'apikey': supabaseKey,
+                                    'Authorization': `Bearer ${supabaseKey}`,
+                                    'Content-Type': 'application/json',
+                                    'Prefer': 'return=minimal'
+                                },
+                                body: JSON.stringify({
+                                    agent_trigger: functionUrl,
+                                    function_name: functionName,
+                                    updated_at: new Date().toISOString()
+                                })
+                            });
+                            
+                            if (updateResponse.status >= 200 && updateResponse.status < 300) {
+                                console.log('Step 20: Agent updated with function URL successfully');
+                            } else {
+                                console.error('Step ERROR: Failed to update agent with function URL:', updateResponse.status);
+                            }
+                        } catch (updateError) {
+                            console.error('Step ERROR: Database update failed:', updateError.message);
+                        }
+                    }
                     
                     return {
                         statusCode: 200,
@@ -892,14 +1306,18 @@ exports.handler = async (event) => {
                             'Access-Control-Allow-Methods': 'OPTIONS,POST'
                         },
                         body: JSON.stringify({
-                            message: 'Lambda function created successfully!',
+                            message: functionExists ? 'Lambda function already exists - Function URL processed!' : 'Lambda function created successfully!',
                             functionName: functionName,
+                            functionUrl: functionUrl,
+                            functionUrlError: functionUrlError,
+                            functionExists: functionExists,
                             userId: userId,
                             config: {
                                 interval: interval,
                                 topics: query,
                                 graphic: graphic,
-                                meme: meme
+                                meme: meme,
+                                video: video
                             },
                             timestamp: new Date().toISOString()
                         })
@@ -959,6 +1377,28 @@ exports.handler = async (event) => {
                 })
             };
         }
+        
+        }
+        
+        // If no matching endpoint found
+        return {
+            statusCode: 404,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
+            body: JSON.stringify({ 
+                error: 'Endpoint not found',
+                path: path,
+                method: httpMethod,
+                available_endpoints: [
+                    'POST /create - Create new Lambda function',
+                    'POST /agent/{agentId} - Call existing agent'
+                ]
+            })
+        };
+        
     } catch (error) {
         console.error('Handler error:', error);
         
