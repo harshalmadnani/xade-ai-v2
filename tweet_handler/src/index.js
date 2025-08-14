@@ -427,6 +427,9 @@ async function postTweet(twitterCredentials, tweetContent) {
       fullContent = fullContent.substring(1, fullContent.length - 1);
     }
     
+    // Filter out emojis and hashtags
+    fullContent = filterEmojisAndHashtags(fullContent);
+    
     // Process media from Supabase links
     const { cleanContent, mediaData } = await processMediaFromContent(fullContent);
     
@@ -701,6 +704,9 @@ async function getAIAnalysis(tweet) {
   try {
     const { fullContent, contextInfo } = extractTweetContent(tweet);
     
+    // Filter out emojis and hashtags from the content before AI analysis
+    const cleanedContent = filterEmojisAndHashtags(fullContent);
+    
     // Create enhanced system prompt based on context
     let systemPrompt = "You are a helpful AI assistant. Analyze the tweet and provide a natural, engaging response under 200 characters no hashtags and do not mention any errors or warnings whatsoever.";
     
@@ -734,7 +740,7 @@ async function getAIAnalysis(tweet) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        query: fullContent,
+        query: cleanedContent,
         systemPrompt: systemPrompt
       })
     });
@@ -852,8 +858,11 @@ async function generateMentionReply(tweet) {
     console.log('⚠️ AI analysis failed, using enhanced fallback logic...');
     
     const { fullContent, contextInfo } = extractTweetContent(tweet);
+    
+    // Filter out emojis and hashtags for better reply generation
+    const cleanedContent = filterEmojisAndHashtags(fullContent);
     let replyText = `@${tweet.username} `;
-    const tweetText = fullContent.toLowerCase();
+    const tweetText = cleanedContent.toLowerCase();
     
     // Context-aware fallback responses
     if (contextInfo.hasQuotedTweet) {
@@ -1321,6 +1330,24 @@ async function setupRealtimeSubscription() {
       }
     )
     .subscribe();
+}
+
+// Helper function to filter out emojis and hashtags
+function filterEmojisAndHashtags(content) {
+  if (!content || typeof content !== 'string') {
+    return content;
+  }
+  
+  // Remove emojis (Unicode emoji characters)
+  let filtered = content.replace(/[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, '');
+  
+  // Remove hashtags (words starting with #)
+  filtered = filtered.replace(/#\w+/g, '');
+  
+  // Remove multiple spaces and trim
+  filtered = filtered.replace(/\s+/g, ' ').trim();
+  
+  return filtered;
 }
 
 // Helper function to detect Supabase links in tweet content
