@@ -122,8 +122,8 @@ async function getTwitterCredentials(agentId) {
 function breakIntoTweetChunks(text, maxLength = 270) {
   const originalText = text.trim();
   
-  // If content is above 200 characters, split into sentence-based tweets
-  if (originalText.length > 200) {
+  // If content is above 240 characters, split into sentence-based tweets
+  if (originalText.length > 280) {
     console.log(`📝 Content is ${originalText.length} characters, splitting into sentence-based thread`);
     return breakIntoSentenceBasedTweets(originalText, maxLength);
   }
