@@ -12,10 +12,29 @@ AWS.config.update({
 const lambda = new AWS.Lambda();
 const iam = new AWS.IAM();
 const eventbridge = new AWS.EventBridge();
+const sts = new AWS.STS();
 
 // Get Supabase credentials from environment variables
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+
+// Function to get AWS account ID
+async function getAwsAccountId() {
+    if (process.env.AWS_ACCOUNT_ID) {
+        return process.env.AWS_ACCOUNT_ID;
+    }
+    
+    try {
+        console.log('Getting AWS account ID from STS...');
+        const accountData = await sts.getCallerIdentity().promise();
+        const accountId = accountData.Account;
+        console.log('AWS Account ID retrieved from STS:', accountId);
+        return accountId;
+    } catch (error) {
+        console.error('Failed to get AWS account ID from STS:', error.message);
+        throw new Error('Could not determine AWS account ID. Please set AWS_ACCOUNT_ID environment variable.');
+    }
+}
 
 // Helper function to make HTTPS requests
 function httpsRequest(url, options = {}) {
@@ -639,89 +658,6 @@ exports.handler = async (event) => {
         }
     }
     
-    // Function to store meme URLs in a separate table
-    async function storeMemeUrls(urls, originalTweetContent) {
-        try {
-            const memeEntries = urls.map((url, index) => ({
-                agent_id: agentId,
-                meme_url: url,
-                original_tweet: originalTweetContent,
-                posted: false,
-                post_order: index + 1,
-                created_at: new Date().toISOString()
-            }));
-            
-            const response = await fetch(supabaseUrl + '/rest/v1/meme_queue', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'apikey': supabaseKey,
-                    'Authorization': 'Bearer ' + supabaseKey
-                },
-                body: JSON.stringify(memeEntries)
-            });
-            
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error('Failed to store meme URLs: ' + errorText);
-            }
-            
-            return { success: true };
-        } catch (error) {
-            console.error('Error storing meme URLs:', error);
-            return { success: false, error: error.message };
-        }
-    }
-    
-    // Function to get and post next pending meme
-    async function postNextMeme() {
-        try {
-            // Get the next unposted meme
-            const response = await fetch(supabaseUrl + '/rest/v1/meme_queue?agent_id=eq.' + agentId + '&posted=eq.false&order=post_order.asc&limit=1', {
-                method: 'GET',
-                headers: {
-                    'apikey': supabaseKey,
-                    'Authorization': 'Bearer ' + supabaseKey
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error('Failed to fetch next meme');
-            }
-            
-            const memes = await response.json();
-            if (!memes || memes.length === 0) {
-                console.log('No pending memes to post');
-                return { success: true, noMemes: true };
-            }
-            
-            const meme = memes[0];
-            
-            // Post the meme to terminal2
-            const postResult = await insertToSupabase(meme.original_tweet, true, meme.meme_url);
-            if (postResult.success !== false) {
-                // Mark meme as posted
-                await fetch(supabaseUrl + '/rest/v1/meme_queue?id=eq.' + meme.id, {
-                    method: 'PATCH',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'apikey': supabaseKey,
-                        'Authorization': 'Bearer ' + supabaseKey
-                    },
-                    body: JSON.stringify({ posted: true, posted_at: new Date().toISOString() })
-                });
-                
-                console.log('Posted meme successfully:', meme.meme_url);
-                return { success: true, memePosted: true };
-            }
-            
-            return postResult;
-        } catch (error) {
-            console.error('Error posting next meme:', error);
-            return { success: false, error: error.message };
-        }
-    }
-    
     // Add function to get last 10 posts
     async function getLastTenPosts() {
         try {
@@ -760,7 +696,7 @@ exports.handler = async (event) => {
                 },
                 body: JSON.stringify({
                     text: tweetContent,
-                    count: 6
+                    count: 1
                 })
             });
             
@@ -926,15 +862,7 @@ exports.handler = async (event) => {
         });
         
         if (isMemeAgentMode) {
-            // For meme agents, first try to post any pending memes
-            const memePostResult = await postNextMeme();
-            if (memePostResult.success && memePostResult.memePosted) {
-                console.log('Posted a pending meme, skipping new content generation');
-                return { success: true, action: 'posted_pending_meme' };
-            }
-            
-            // If no pending memes, generate new content and memes
-            console.log('No pending memes, generating new content');
+            console.log('Meme agent detected - will generate and post memes directly');
         }
         
         // Get last 10 posts before making the analysis call
@@ -1074,25 +1002,40 @@ exports.handler = async (event) => {
                 if (memeUrls && memeUrls.length > 0) {
                     console.log('Generated', memeUrls.length, 'memes');
                     
-                    // Store meme URLs for posting at intervals
-                    const storeResult = await storeMemeUrls(memeUrls, description);
-                    if (storeResult.success) {
-                        console.log('Stored meme URLs successfully');
-                        
-                        // Post the first meme immediately
-                        const firstMemeResult = await postNextMeme();
-                        
-                        return { 
-                            success: true, 
-                            action: 'generated_memes',
-                            memeCount: memeUrls.length,
-                            firstMemePosted: firstMemeResult.success && firstMemeResult.memePosted
-                        };
+                    // For meme agents, we now post the memes directly instead of using a queue.
+                    // This means we need to call the terminal2 endpoint for each meme.
+                    for (const memeUrl of memeUrls) {
+                        try {
+                            const postResult = await insertToSupabase(description, true, memeUrl);
+                            if (postResult.success !== false) {
+                                console.log('Posted meme successfully:', memeUrl);
+                            } else {
+                                console.error('Failed to post meme:', memeUrl, postResult.error);
+                            }
+                        } catch (postError) {
+                            console.error('Error posting meme directly:', memeUrl, postError.message);
+                        }
                     }
+                    
+                    return { 
+                        success: true, 
+                        action: 'generated_memes',
+                        memeCount: memeUrls.length,
+                        // No specific 'firstMemePosted' as it's now direct posting
+                    };
+                } else {
+                    console.log('No memes generated, falling back to regular text post');
+                    // Fall back to regular text post if no memes were generated
+                    const result = await insertToSupabase(description);
+                    console.log('Regular text post stored successfully');
+                    return { success: true, action: 'regular_post_fallback' };
                 }
             } catch (error) {
                 console.error('Error with meme generation:', error);
                 // Fall back to regular text post if meme generation fails
+                const result = await insertToSupabase(description);
+                console.log('Regular text post stored successfully after meme generation failure');
+                return { success: true, action: 'regular_post_fallback' };
             }
         }
         
@@ -1267,10 +1210,81 @@ exports.handler = async (event) => {
                         hasError: !!functionUrlError
                     });
                     
+                    // Create EventBridge trigger for scheduled execution
+                    console.log('Step 19: Setting up EventBridge trigger for scheduled execution...');
+                    let eventbridgeError = null;
+                    
+                    if (interval && interval > 0) {
+                        try {
+                            const ruleName = `${functionName}-schedule`;
+                            console.log(`Step 19.1: Creating EventBridge rule: ${ruleName} with interval: ${interval} minutes`);
+                            
+                            // Create the EventBridge rule
+                            const ruleParams = {
+                                Name: ruleName,
+                                ScheduleExpression: `rate(${interval} minutes)`,
+                                State: 'ENABLED',
+                                Description: `Scheduled trigger for ${functionName} every ${interval} minutes`
+                            };
+                            
+                            console.log('Step 19.2: EventBridge rule params:', JSON.stringify(ruleParams, null, 2));
+                            
+                            await eventbridge.putRule(ruleParams).promise();
+                            console.log(`Step 19.3: EventBridge rule created successfully: ${ruleName}`);
+                            
+                            // Add the Lambda function as a target
+                            console.log('Step 19.4: Adding Lambda function as target...');
+                            const targetParams = {
+                                Rule: ruleName,
+                                Targets: [
+                                    {
+                                        Id: '1',
+                                        Arn: `arn:aws:lambda:${process.env.AWS_REGION || 'us-east-1'}:${await getAwsAccountId()}:function:${functionName}`
+                                    }
+                                ]
+                            };
+                            
+                            await eventbridge.putTargets(targetParams).promise();
+                            console.log('Step 19.5: Lambda function added as target successfully');
+                            
+                            // Add permission for EventBridge to invoke the Lambda function
+                            console.log('Step 19.6: Adding EventBridge invoke permission...');
+                            try {
+                                await lambda.addPermission({
+                                    Action: 'lambda:InvokeFunction',
+                                    FunctionName: functionName,
+                                    Principal: 'events.amazonaws.com',
+                                    StatementId: `${ruleName}-permission`,
+                                    SourceArn: `arn:aws:events:${process.env.AWS_REGION || 'us-east-1'}:${await getAwsAccountId()}:rule/${ruleName}`
+                                }).promise();
+                                console.log('Step 19.7: EventBridge invoke permission added successfully');
+                            } catch (permError) {
+                                // Ignore if permission already exists
+                                if (permError.code !== 'ResourceConflictException') {
+                                    throw permError;
+                                }
+                                console.log('Step 19.7: EventBridge permission already exists, continuing...');
+                            }
+                            
+                            console.log(`✅ EventBridge trigger setup completed successfully for ${functionName}`);
+                            console.log(`⏰ Function will execute every ${interval} minutes`);
+                            
+                        } catch (eventbridgeError) {
+                            console.error('Step ERROR: EventBridge trigger setup failed:', {
+                                message: eventbridgeError.message,
+                                code: eventbridgeError.code,
+                                statusCode: eventbridgeError.statusCode
+                            });
+                            eventbridgeError = `${eventbridgeError.code || 'UnknownError'}: ${eventbridgeError.message}`;
+                        }
+                    } else {
+                        console.log('Step 19: No interval specified, skipping EventBridge trigger setup');
+                    }
+                    
                     // Update agent in database with function URL
                     if (functionUrl) {
                         try {
-                            console.log('Step 19: Updating agent with function URL...');
+                            console.log('Step 20: Updating agent with function URL...');
                             const updateUrl = `${supabaseUrl}/rest/v1/agents2?id=eq.${userId}`;
                             
                             const updateResponse = await httpsRequest(updateUrl, {
@@ -1284,12 +1298,15 @@ exports.handler = async (event) => {
                                 body: JSON.stringify({
                                     agent_trigger: functionUrl,
                                     function_name: functionName,
+                                    eventbridge_rule: interval && interval > 0 ? `${functionName}-schedule` : null,
+                                    eventbridge_interval: interval || null,
+                                    eventbridge_status: interval && interval > 0 ? (eventbridgeError ? 'failed' : 'active') : null,
                                     updated_at: new Date().toISOString()
                                 })
                             });
                             
                             if (updateResponse.status >= 200 && updateResponse.status < 300) {
-                                console.log('Step 20: Agent updated with function URL successfully');
+                                console.log('Step 21: Agent updated with function URL successfully');
                             } else {
                                 console.error('Step ERROR: Failed to update agent with function URL:', updateResponse.status);
                             }
@@ -1312,6 +1329,12 @@ exports.handler = async (event) => {
                             functionUrlError: functionUrlError,
                             functionExists: functionExists,
                             userId: userId,
+                            eventbridgeTrigger: interval && interval > 0 ? {
+                                ruleName: `${functionName}-schedule`,
+                                interval: `${interval} minutes`,
+                                status: eventbridgeError ? 'failed' : 'success',
+                                error: eventbridgeError
+                            } : null,
                             config: {
                                 interval: interval,
                                 topics: query,
