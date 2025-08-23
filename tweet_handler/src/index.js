@@ -427,6 +427,12 @@ async function postTweet(twitterCredentials, tweetContent) {
       fullContent = fullContent.substring(1, fullContent.length - 1);
     }
     
+    // Check for TPS content and reject if found
+    if (fullContent.toLowerCase().includes('tps')) {
+      console.log('❌ Tweet rejected: Contains TPS content');
+      return false;
+    }
+    
     // Filter out emojis and hashtags
     fullContent = filterEmojisAndHashtags(fullContent);
     
@@ -973,9 +979,10 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
         
         // Basic spam check
         if (tweet.text?.toLowerCase().includes('win free') || 
-            tweet.text?.toLowerCase().includes('click here')) {
+            tweet.text?.toLowerCase().includes('click here') ||
+            tweet.text?.toLowerCase().includes('tps')) {
           skippedCount.spam++;
-          console.log('  🚫 Skipped: Potential spam');
+          console.log('  🚫 Skipped: Potential spam or contains TPS');
           continue;
         }
         
@@ -1099,11 +1106,17 @@ async function handleTweetReplies(scraper, credentials, maxTweets = 5, delayMs =
 
         // Process each reply
         for (const reply of replies) {
-          // Skip if the reply mentions the agent (will be handled by mentions system)
-          if (reply.text?.includes(`@${myUsername}`)) {
-            console.log(`  🔄 Skipping reply from @${reply.username} - contains mention, will be handled by mentions system`);
-            continue;
-          }
+                  // Skip if the reply mentions the agent (will be handled by mentions system)
+        if (reply.text?.includes(`@${myUsername}`)) {
+          console.log(`  🔄 Skipping reply from @${reply.username} - contains mention, will be handled by mentions system`);
+          continue;
+        }
+        
+        // Skip replies containing TPS
+        if (reply.text?.toLowerCase().includes('tps')) {
+          console.log(`  🚫 Skipping reply from @${reply.username} - contains TPS content`);
+          continue;
+        }
 
           // Check if we've already replied to this tweet
           const hasReplied = await hasAlreadyReplied(scraper, reply.id, myUsername);
@@ -1273,15 +1286,21 @@ async function setupRealtimeSubscription() {
               console.log('\n🎯 Checking target users\' tweets...');
               const targetTweets = await getTargetUserTweets(payload.new.agent_id);
               
-              // Process and reply to target tweets
-              for (const tweet of targetTweets) {
-                try {
-                  // Check if we've already replied
-                  const hasReplied = await hasAlreadyReplied(scraper, tweet.id, credentials.username);
-                  if (hasReplied) {
-                    console.log(`Already replied to @${tweet.username}'s tweet`);
-                    continue;
-                  }
+                                // Process and reply to target tweets
+                  for (const tweet of targetTweets) {
+                    try {
+                      // Skip tweets containing TPS
+                      if (tweet.text?.toLowerCase().includes('tps')) {
+                        console.log(`🚫 Skipped @${tweet.username}'s tweet: Contains TPS content`);
+                        continue;
+                      }
+                      
+                      // Check if we've already replied
+                      const hasReplied = await hasAlreadyReplied(scraper, tweet.id, credentials.username);
+                      if (hasReplied) {
+                        console.log(`Already replied to @${tweet.username}'s tweet`);
+                        continue;
+                      }
 
                   const tweetType = tweet.isRetweet ? 'retweet' : 
                                    tweet.isQuoted ? 'quote tweet' : 
