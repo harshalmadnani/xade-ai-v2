@@ -427,6 +427,17 @@ async function postTweet(twitterCredentials, tweetContent) {
       fullContent = fullContent.substring(1, fullContent.length - 1);
     }
     
+    // Check for prohibited content and reject if found
+    const prohibitedTerms = ['wzelcore', 'truffle', 'unitt', 'hack-a-chain'];
+    const hasProhibitedContent = prohibitedTerms.some(term => 
+      fullContent.toLowerCase().includes(term.toLowerCase())
+    );
+    
+    if (hasProhibitedContent) {
+      console.log('❌ Tweet rejected: Contains prohibited content');
+      return false;
+    }
+    
     // Check for TPS content and reject if found
     if (fullContent.toLowerCase().includes('tps')) {
       console.log('❌ Tweet rejected: Contains TPS content');
@@ -978,6 +989,17 @@ async function replyToMentions(scraper, credentials, maxMentions = 10, delayMs =
         }
         
         // Basic spam check
+        const prohibitedTerms = ['wzelcore', 'truffle', 'unitt', 'hack-a-chain'];
+        const hasProhibitedContent = prohibitedTerms.some(term => 
+          tweet.text?.toLowerCase().includes(term.toLowerCase())
+        );
+        
+        if (hasProhibitedContent) {
+          skippedCount.spam++;
+          console.log('  🚫 Skipped: Contains prohibited content');
+          continue;
+        }
+        
         if (tweet.text?.toLowerCase().includes('win free') || 
             tweet.text?.toLowerCase().includes('click here') ||
             tweet.text?.toLowerCase().includes('tps')) {
@@ -1109,6 +1131,17 @@ async function handleTweetReplies(scraper, credentials, maxTweets = 5, delayMs =
                   // Skip if the reply mentions the agent (will be handled by mentions system)
         if (reply.text?.includes(`@${myUsername}`)) {
           console.log(`  🔄 Skipping reply from @${reply.username} - contains mention, will be handled by mentions system`);
+          continue;
+        }
+        
+        // Skip replies containing prohibited content
+        const prohibitedTerms = ['wzelcore', 'truffle', 'unitt', 'hack-a-chain'];
+        const hasProhibitedContent = prohibitedTerms.some(term => 
+          reply.text?.toLowerCase().includes(term.toLowerCase())
+        );
+        
+        if (hasProhibitedContent) {
+          console.log(`  🚫 Skipping reply from @${reply.username} - contains prohibited content`);
           continue;
         }
         
@@ -1289,6 +1322,17 @@ async function setupRealtimeSubscription() {
                                 // Process and reply to target tweets
                   for (const tweet of targetTweets) {
                     try {
+                      // Skip tweets containing prohibited content
+                      const prohibitedTerms = ['wzelcore', 'truffle', 'unitt', 'hack-a-chain'];
+                      const hasProhibitedContent = prohibitedTerms.some(term => 
+                        tweet.text?.toLowerCase().includes(term.toLowerCase())
+                      );
+                      
+                      if (hasProhibitedContent) {
+                        console.log(`🚫 Skipped @${tweet.username}'s tweet: Contains prohibited content`);
+                        continue;
+                      }
+                      
                       // Skip tweets containing TPS
                       if (tweet.text?.toLowerCase().includes('tps')) {
                         console.log(`🚫 Skipped @${tweet.username}'s tweet: Contains TPS content`);
