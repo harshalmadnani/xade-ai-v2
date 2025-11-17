@@ -38,3 +38,5 @@ try {
     console.log('Trying alternative approach - updating Lambda response headers...');
 }
 
+
+

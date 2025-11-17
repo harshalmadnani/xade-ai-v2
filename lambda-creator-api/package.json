@@ -1,6 +1,6 @@
 {
   "name": "lambda-creator-api",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -8,14 +8,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Vercel API routes for agent management with Supabase Edge Functions",
   "dependencies": {
-    "@supabase/supabase-js": "^2.50.5",
-    "aws-sdk": "^2.1692.0",
-    "axios": "^1.8.1",
-    "cors": "^2.8.5",
-    "dotenv": "^16.6.1",
-    "express": "^5.1.0",
-    "jszip": "^3.10.1"
+    "@supabase/supabase-js": "^2.50.5"
   }
 }
